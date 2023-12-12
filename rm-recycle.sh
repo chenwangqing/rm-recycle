@@ -51,8 +51,9 @@ function CheckFile() {
 
 # 删除文件
 function DeleteFile() {
-    local dir=$1
-    local file=$2
+    local dir_last=$1
+    local dir=$2
+    local file=$3
     # 检查文件是否保护
     local ret=$(CheckFile $file)
     [[ "$ret" != "Ok" ]] && echo "$file: 文件保护" && return
@@ -60,8 +61,18 @@ function DeleteFile() {
     if [[ "$f_dir" =~ ^$_RECYCLE_DIR.* ]];then
         $DEL_EXEC -rf $file # 删除回收站文件
     else
-        [ ! -d "${dir}${f_dir}" ] && mkdir -p "${dir}${f_dir}"
-        mv -f "$file" "${dir}${f_dir}/"
+        # 检查上一个存储点是否有空的位置
+        if [[ "$dir_last" != "" ]] && [ ! -e "${dir_last}${file}" ];then
+            [ ! -d "${dir_last}${f_dir}" ] && mkdir -p "${dir_last}${f_dir}"
+            #echo mv -f "$file" "${dir_last}${f_dir}/"
+            mv -f "$file" "${dir_last}${f_dir}/"
+        else
+            # 使用新的存储点
+            [ ! -d "${dir}${f_dir}" ] && mkdir -p "${dir}${f_dir}"
+            #echo mv -f "$file" "${dir}${f_dir}/"
+            mv -f "$file" "${dir}${f_dir}/"
+            dir_last="" # 一旦使用新的存储就不能使用之前的
+        fi
     fi
     return
 }
@@ -105,12 +116,12 @@ function ResetRecycle() {
     [[ "$start" = "" ]] && start=0
     [[ "$end" = "" ]] && end=$idx || end=$(expr $end + 1)
     [ ${file:0:1} = "/" ] || file=$(realpath $file)
-    if [ -e "$file" ]; then
-       if [ ! -d "$file" ] || [ "$(ls -A $file)" != "" ];then
-            echo "文件已存在，无法还原：$file"
-            return
-       fi
-    fi
+    # if [ -e "$file" ]; then
+    #    if [ ! -d "$file" ] || [ "$(ls -A $file)" != "" ];then
+    #         echo "文件已存在，无法还原：$file"
+    #         return
+    #    fi
+    # fi
     echo -n "开始还原文件（$file [$start-$end]）?[Y/N]"
     read isOk
     [[ "$isOk" = "y" ]] && isOk='Y'
@@ -240,16 +251,20 @@ if [ ! -d ${RECYCLE_DIR} ]; then
 fi
 # 获取索引
 idx=$(ls ${RECYCLE_DIR} | sort -r | head -n 1)
+DIR_LAST=''
 if [[ "$idx" = "" ]]; then
     DIR=`printf "%08d" 0`
+    DIR_LAST=$DIR
 else
     idx=$(( 10#$idx )) # 去除前面的0
     DIR=`printf "%08d" ${idx}`
+    DIR_LAST=$DIR
     if [ "$(ls -A ${RECYCLE_DIR}/$DIR)" != "" ]; then
         idx=$(expr $idx + 1)
         DIR=`printf "%08d" $idx`
     fi
 fi
+DIR_LAST=${RECYCLE_DIR}/$DIR_LAST
 DIR=${RECYCLE_DIR}/$DIR
 
 # 创建回收站文件夹
@@ -263,7 +278,7 @@ for arg in "$@"; do
         # 获取绝对路径
         file=$(realpath $arg)
         [ ! -e "$file" ] && continue
-        DeleteFile $DIR $file
+        DeleteFile $DIR_LAST $DIR $file
     fi
 done
 # 删除空的文件夹
