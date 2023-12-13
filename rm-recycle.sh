@@ -29,6 +29,12 @@ ProtectionList=(       # 保护文件夹列表
     /usr/local/include
     /usr/local/sbin
     /usr/local/share
+    /mnt/c
+    /mnt/d
+    /mnt/e
+    /mnt/f
+    /mnt/wsl
+    /mnt/wslg
     # 自定义...
 )
 ## ----------------------------------   END   ---------------------------------- ##
@@ -36,7 +42,7 @@ ProtectionList=(       # 保护文件夹列表
 DIR=$RECYCLE_DIR  
 _flag=' '        # 功能标志
 idx=0
-_RECYCLE_DIR=`realpath $RECYCLE_DIR`
+_RECYCLE_DIR=$(realpath $RECYCLE_DIR)
 
 # 检查
 function CheckFile() {
@@ -46,6 +52,10 @@ function CheckFile() {
     for p in ${ProtectionList[@]}; do
         [[ "$file" = "$p" ]] && echo "Fail" && return
     done
+    # 自身保护/防止自身本删除
+    # local base_dir=$(dirname $(realpath $0))
+    # local dir=$(dirname $file)
+    # [[ $base_dir =~ ^$dir.* ]] && echo "Fail" && return
     echo "Ok"
 }
 
@@ -116,12 +126,10 @@ function ResetRecycle() {
     [[ "$start" = "" ]] && start=0
     [[ "$end" = "" ]] && end=$idx || end=$(expr $end + 1)
     [ ${file:0:1} = "/" ] || file=$(realpath $file)
-    # if [ -e "$file" ]; then
-    #    if [ ! -d "$file" ] || [ "$(ls -A $file)" != "" ];then
-    #         echo "文件已存在，无法还原：$file"
-    #         return
-    #    fi
-    # fi
+    if [ -e "$file" ] && [ ! -d "$file" ]; then
+        echo "文件已存在，无法还原：$file"
+    fi
+
     echo -n "开始还原文件（$file [$start-$end]）?[Y/N]"
     read isOk
     [[ "$isOk" = "y" ]] && isOk='Y'
@@ -135,7 +143,7 @@ function ResetRecycle() {
         end=$(expr $end - 1)
         # 遍历结束 start < end
         [[ $start -gt $idx ]] && break
-        idx=`printf "%08d" ${idx}`
+        idx=$(printf "%08d" ${idx})
         # 检查文件夹是否存在
         [ ! -d ${RECYCLE_DIR}/$idx ] && continue
         # 检查文件
@@ -183,7 +191,7 @@ function ListRecycle()
         end=$(expr $end - 1)
         # 遍历结束 start < end
         [[ $start -gt $idx ]] && break
-        idx=`printf "%08d" ${idx}`
+        idx=$(printf "%08d" ${idx})
         # 检查文件夹是否存在
         [ ! -d ${RECYCLE_DIR}/$idx ] && continue
         # 检查文件
@@ -253,22 +261,21 @@ fi
 idx=$(ls ${RECYCLE_DIR} | sort -r | head -n 1)
 DIR_LAST=''
 if [[ "$idx" = "" ]]; then
-    DIR=`printf "%08d" 0`
+    DIR=$(printf "%08d" 0)
     DIR_LAST=$DIR
 else
     idx=$(( 10#$idx )) # 去除前面的0
-    DIR=`printf "%08d" ${idx}`
+    DIR=$(printf "%08d" ${idx})
     DIR_LAST=$DIR
     if [ "$(ls -A ${RECYCLE_DIR}/$DIR)" != "" ]; then
         idx=$(expr $idx + 1)
-        DIR=`printf "%08d" $idx`
+        DIR=$(printf "%08d" $idx)
     fi
 fi
 DIR_LAST=${RECYCLE_DIR}/$DIR_LAST
 DIR=${RECYCLE_DIR}/$DIR
 
-# 创建回收站文件夹
-mkdir -p $DIR
+# 执行
 for arg in "$@"; do
     if [[ ${arg:0:1} = "-" ]];then
         _flag=$arg
@@ -281,7 +288,5 @@ for arg in "$@"; do
         DeleteFile $DIR_LAST $DIR $file
     fi
 done
-# 删除空的文件夹
-DeleteEmpty $DIR
 exit 0
 # ------------------------------------------ END ------------------------------------------
