@@ -31,20 +31,24 @@ PATH=/usr/local/bin:$PATH
 实现回收站功能 1.0
 替代命令              : ln -s rm-recycle.sh /usr/local/bin/rm
 回收站路径            : /root/.recycle
-回收站已用大小        : 190M [210]
+回收站已用大小        : 1.5G
+最大存储点            : 1309
 移动文件夹到回收站    :
         rm xxx xxxx
         rm -rf xxx/* xxx/*
         rm -rf ../xxx ../xxx
-清空回收站            : rm -clean [start] [end]
-还原文件              : rm -reset 文件(夹) [start] [end]
-查看回收站文件        : rm -list 文件(夹) [start] [end] [深度]
+清空回收站            : rm -clean [起始存储点] [结束存储点]
+还原文件              : rm -reset 文件(夹) [起始存储点] [结束存储点]
+查看回收站文件        : rm -list 文件(夹) [起始存储点] [结束存储点] [深度]
+更新回收站视图        : rm -show [文件(夹)] [起始存储点] [结束存储点]
+删除回收站视图        : rm -delshow
+
 ```
 
 ### 2.回收站结构
 
 ```sh
-# ls -lh /root/.recycle
+# ls -lh /root/.recycle/snapshoot
 total 836K
 drwxr-xr-x 3 root root 4.0K Dec 12 16:56 00000000
 drwxr-xr-x 3 root root 4.0K Dec 12 16:56 00000001
@@ -59,4 +63,14 @@ drwxr-xr-x 3 root root 4.0K Dec 12 16:56 00000009
 drwxr-xr-x 3 root root 4.0K Dec 12 16:56 00000010
 ```
 
-每进行一次rm操作就会创建一个删除文件的快照
+每进行一次rm操作就可能会创建一个删除文件的快照
+
+### 3.回收站视图
+
+为了更方便查看回收站内容可以通过一下目录生成回收站视图
+
+```sh
+rm -show
+```
+
+然后在/root/.recycle/view可以看到回收站内容
