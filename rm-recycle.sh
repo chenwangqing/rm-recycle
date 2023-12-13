@@ -99,6 +99,7 @@ function DeleteEmpty() {
 function CleanRecycle() {
     local start=$1
     local end=$2
+    local dir=""
     if [[ "$start" = "" ]]; then
         ${DEL_EXEC} -rf ${RECYCLE_DIR}/*
     else
@@ -107,7 +108,8 @@ function CleanRecycle() {
             # 遍历结束 start < end
             [[ $start -ge $end ]] && break
             # 检查文件夹是否存在
-            [ -d ${RECYCLE_DIR}/$start ] && ${DEL_EXEC} -rf ${RECYCLE_DIR}/$start
+            dir=${RECYCLE_DIR}/$(printf "%08d" $start)
+            [ -d $dir ] && ${DEL_EXEC} -rf $dir
             # 计数器增加
             start=$(expr $start + 1)
         done
