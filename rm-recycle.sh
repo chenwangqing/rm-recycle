@@ -7,11 +7,6 @@
 # 1.0   2023年12月12日  创建
 #############################################################################################
 
-# 防止脚本同时运行
-LOCKFILE="/var/lock/$(basename $0).lock"
-exec 7<>$LOCKFILE
-flock 7
-
 ## ---------------------------------- 参数配置 ---------------------------------- ##
 RECYCLE_DIR=~/.recycle # 回收站路径
 DEL_EXEC=/usr/bin/rm   # 实际删除程序
@@ -39,9 +34,66 @@ ProtectionList=( # 保护文件夹列表
 )
 ## ----------------------------------   END   ---------------------------------- ##
 
-idx=1
+idx_max=1
+idx_min=0
 _flag=' ' # 功能标志
 _RECYCLE_DIR=$(realpath $RECYCLE_DIR)
+Pars_Start_idx=
+Pars_End_idx=
+Pars_Start_Time=
+Pars_End_Time=
+
+# 获取参数
+function GetPars() {
+    local s1=$1
+    local s2=$2
+    if [[ "$s1" = "" ]] || [[ "$s1" = "-" ]]; then
+        Pars_Start_idx=$idx_min
+    elif [[ "$s1" =~ [:|-] ]]; then
+        Pars_Start_Time=$s1
+    else
+        Pars_Start_idx=$((10#$s1))
+        [[ $Pars_Start_idx < $idx_min ]] && Pars_Start_idx=$idx_min
+    fi
+    if [[ "$s2" = "" ]] || [[ "$s2" = "-" ]]; then
+        Pars_End_idx=$idx_max
+    elif [[ "$s2" =~ [:|-] ]]; then
+        Pars_End_Time=$s2
+    else
+        Pars_End_idx=$((10#$s2))
+        [[ $Pars_End_idx -gt $idx_max ]] && Pars_End_idx=$idx_max
+    fi
+    if [[ "$Pars_Start_Time" != "" ]]; then
+        [[ "$s2" != "" ]] && [[ ! "$Pars_End_Time" =~ [:|-] ]] && echo "时间格式错误: $s2" && exit 1
+        [[ "$Pars_End_Time" = "" ]] && Pars_End_Time=$(date "+%Y-%m-%d" -d '+1 day')
+    fi
+    [[ "$Pars_Start_idx" != "" ]] && [[ "$Pars_End_idx" = "" ]] && Pars_End_idx=$idx_max
+    [[ "$Pars_Start_idx" = "" ]] && Pars_Start_idx=$idx_min
+    [[ "$Pars_End_idx" = "" ]] && Pars_End_idx=$idx_max
+    echo " - RANG: [$Pars_Start_idx - $Pars_End_idx] [$Pars_Start_Time - $Pars_End_Time]"
+    return
+}
+
+LOCKFILE="/var/lock/$(basename $0).lock"
+exec 200<>$LOCKFILE
+
+# 加锁
+function Lock() {
+    local t=0
+    while true; do
+        flock -w 1 200
+        [[ "$?" = "0" ]] && break
+        t=$(expr $t + 1)
+        printf " rm 其它程序正在使用 ... $t\r"
+    done
+    [[ $t -gt 0 ]] && printf "                            \r"
+    return
+}
+
+# 解锁
+function UnLock() {
+    flock -u 200
+}
 
 # 检查
 function CheckFile() {
@@ -94,65 +146,125 @@ function DeleteFile() {
     return
 }
 
-# 删除空文件夹
-function DeleteEmpty() {
-    local dir=$1
-    [ ! -d $dir ] && return 0
-    [ "$(ls -A $dir)" = "" ] && ${DEL_EXEC} -rf "$dir"
-    return 0
+# 修正信息
+function FixInfo() {
+    # 删除所有空的目录
+    find ${RECYCLE_DIR}/snapshoot -type d -empty -delete
+    local start=$idx_min
+    local end=$idx_max
+    while [[ $start -lt $end ]]; do
+        # 检查文件夹是否存在
+        dir=${RECYCLE_DIR}/snapshoot/$(printf "%010d" $start)
+        [ -d $dir ] && break
+        start=$(expr $start + 1)
+    done
+    echo $start >${RECYCLE_DIR}/snapshoot.min && sync -f ${RECYCLE_DIR}/snapshoot.min
+    return
 }
 
 # 清空文件夹
 function CleanRecycle() {
-    local start=$1
-    local end=$2
     local dir=""
-    [[ "$start" = "" ]] && start=0
-    [[ "$end" = "" ]] && end=$idx || end=$(expr $end + 1)
-    start=$((10#$start))
-    end=$((10#$end))
-
-    if [[ "$start" = "" ]]; then
+    GetPars $1 $2
+    if [[ "$1" = "" ]] && [[ "$2" = "" ]]; then
         ${DEL_EXEC} -rf ${RECYCLE_DIR}/*
-    else
+    elif [[ "$Pars_Start_idx" != "" ]]; then
         while true; do
-            # 遍历结束 start < end
-            [[ $start -ge $end ]] && break
+            # 遍历结束
+            [[ $Pars_Start_idx -gt $Pars_End_idx ]] && break
             # 检查文件夹是否存在
-            dir=${RECYCLE_DIR}/snapshoot/$(printf "%010d" $start)
-            [ -d $dir ] && ${DEL_EXEC} -rf $dir
+            dir=${RECYCLE_DIR}/snapshoot/$(printf "%010d" $Pars_Start_idx)
+            [ -d $dir ] && ${DEL_EXEC} -rf "$dir"
             # 计数器增加
-            start=$(expr $start + 1)
+            Pars_Start_idx=$(expr $Pars_Start_idx + 1)
         done
+        FixInfo
+    elif [[ "$Pars_Start_Time" ]]; then
+        cd ${RECYCLE_DIR}/snapshoot
+        for p in $(find ./ -newermt "$Pars_Start_Time" ! -newermt "$Pars_End_Time"); do
+            [ -d $p ] && continue
+            echo "删除文件: $p"
+            $DEL_EXEC -rf "$p"
+        done
+        FixInfo
     fi
-    return 0
+    exit 0
+}
+
+# 清理回收站
+function ClearRecycle() {
+    local dir=$1
+    local suffix=$2
+    if [[ "$dir" = "" ]] || [[ "$suffix" = "" ]]; then
+        echo "参数错误" >&2
+        exit 1
+    fi
+    local pro=2
+    local pro_str=""
+    local start=$idx_min
+    local end=$idx_max
+    local sum=$(expr $end - $start)
+    local str=""
+    local OLDIFS="$IFS" #备份旧的IFS变量
+    IFS=$';'            #修改分隔符
+    for p in $suffix; do
+        [[ "$str" != "" ]] && str+=" -o"
+        str+=" -name \"${p/<>/*}\""
+    done
+    IFS=$OLDIFS
+    # echo sh -c "find \".${dir}\" $str | xargs $DEL_EXEC -rf"
+    # exit 0
+    while true; do
+        # 计数器
+        local idx=$end
+        end=$(expr $end - 1)
+        # 遍历结束
+        [[ $start -gt $idx ]] && break
+        # 显示进度条
+        v=$(expr $(expr $sum - $idx + $start) \* 100 / $sum)
+        while [[ $v -ge $pro ]]; do
+            pro=$(expr $pro + 2)
+            pro_str+="="
+        done
+        idx=$(printf "%010d" ${idx})
+        printf " 正在清理: %s [%-50s] %3d%%\r" $idx $pro_str $v
+        # 检查文件夹是否存在
+        [ ! -d ${RECYCLE_DIR}/snapshoot/$idx ] && continue
+        # 检查文件
+        [ ! -e ${RECYCLE_DIR}/snapshoot/${idx}${dir} ] && continue
+        cd ${RECYCLE_DIR}/snapshoot/$idx
+        # 删除后缀
+        sh -c "find \".${dir}\" $str | xargs $DEL_EXEC -rf"
+    done
+    echo ""
+    FixInfo
+    exit 0
 }
 
 # 还原回收站
 function ResetRecycle() {
     local file=$1
-    local start=$2
-    local end=$3
     local isOk='N'
     local pro=2
     local pro_str=""
-    local sum=$idx
+
+    GetPars $2 $3
 
     [[ "$file" = "" ]] && echo "参数错误" && return
-    [[ "$start" = "" ]] && start=0
-    [[ "$end" = "" ]] && end=$idx || end=$(expr $end + 1)
     [ ${file:0:1} = "/" ] || file=$(realpath $file)
     if [ -e "$file" ] && [ ! -d "$file" ]; then
-        echo "文件已存在，无法还原：$file"
+        echo "文件已存在，无法还原：$file" >&2
+        exit 1
     fi
-    start=$((10#$start))
-    end=$((10#$end))
-    sum=$(expr $end - $start)
 
-    echo -n "开始还原文件（$file [$start-$end]）?[Y/N]"
+    local start=$Pars_Start_idx
+    local end=$Pars_End_idx
+    local sum=$(expr $Pars_End_idx - $Pars_Start_idx)
+
+    echo -n "开始还原文件（$file）?[Y/N]"
     read isOk
     [[ "$isOk" = "y" ]] && isOk='Y'
-    [[ "$isOk" != "Y" ]] && echo "取消还原操作" && return
+    [[ "$isOk" != "Y" ]] && echo "取消还原操作" && exit 1
 
     local OLDIFS="$IFS" #备份旧的IFS变量
     IFS=$'\n'           #修改分隔符为换行符
@@ -160,16 +272,16 @@ function ResetRecycle() {
         # 计数器
         local idx=$end
         end=$(expr $end - 1)
+        # 遍历结束
+        [[ $start -gt $idx ]] && break
         # 显示进度条
-        v=$(expr $(expr $sum - $end + $start) \* 100 / $sum)
+        v=$(expr $(expr $sum - $idx + $start) \* 100 / $sum)
         while [[ $v -ge $pro ]]; do
             pro=$(expr $pro + 2)
             pro_str+="="
         done
-        printf "[%-50s]%3d%%\r" $pro_str $v
-        # 遍历结束 start < end
-        [[ $start -gt $idx ]] && break
         idx=$(printf "%010d" ${idx})
+        printf " 正在还原: %s [%-50s] %3d%%\r" $idx $pro_str $v
         # 检查文件夹是否存在
         [ ! -d ${RECYCLE_DIR}/snapshoot/$idx ] && continue
         # 检查文件
@@ -180,7 +292,7 @@ function ResetRecycle() {
             p=$file
             # 检查文件是否已存在
             [ -e "${p}" ] && break
-            echo "还原 $idx: ${p}"
+            echo " 还原 $idx: ${p}"
             local t_dir=$(dirname $p)
             if [ ! -d "$t_dir" ]; then
                 # 文件夹不存在，创建文件夹
@@ -192,53 +304,57 @@ function ResetRecycle() {
             break
         else
             # 遍历文件夹
-            for p in $(find .${file}); do
+            if [[ "$Pars_Start_Time" != "" ]]; then
+                files=$(find .${file} -newermt "$Pars_Start_Time" ! -newermt "$Pars_End_Time")
+            else
+                files=$(find .${file})
+            fi
+            for p in $files; do
                 # 跳过文件夹
                 [ -d $p ] && continue
                 p=${p:1}
                 # 检查文件是否已存在
                 [ -e "${p}" ] && continue
-                echo "还原 $idx: ${p}"
+                echo " 还原 $idx: ${p}"
                 local t_dir=$(dirname $p)
                 if [ ! -d "$t_dir" ]; then
                     # 文件夹不存在，创建文件夹
                     mkdir -p "${t_dir}" 2>/dev/null
-                    [[ "$?" != "0" ]] && echo "文件夹创建失败: ${t_dir}" && continue
+                    [[ "$?" != "0" ]] && echo " [$idx]文件夹创建失败: ${t_dir}" && continue
                 fi
                 # 移动文件
                 mv -n ".${p}" "${p}"
-                [[ "$?" != "0" ]] && echo "文件移动失败: ${p}" && continue
+                [[ "$?" != "0" ]] && echo " [$idx]文件移动失败: ${p}" && continue
             done
         fi
     done
     # 删除所有空的目录
-    find ${RECYCLE_DIR}/snapshoot -type d -empty -delete
+    FixInfo
     IFS="$OLDIFS" #还原IFS变量
     echo ""
-    return 0
+    exit 0
 }
 
 # 列出回收站文件
 function ListRecycle() {
     local file=$1
-    local start=$2
-    local end=$3
     local depth=$4
 
+    GetPars $2 $3
+
     [[ "$file" = "" ]] && echo "参数错误" && return
-    [[ "$start" = "" ]] && start=0
-    [[ "$end" = "" ]] && end=$idx || end=$(expr $end + 1)
     [[ ${file:0:1} = "/" ]] || file=$(realpath $file)
     [[ "$depth" = "" ]] && depth=32767
+
+    local start=$Pars_Start_idx
+    local end=$Pars_End_idx
     local OLDIFS="$IFS" #备份旧的IFS变量
     IFS=$'\n'           #修改分隔符为换行符
-    start=$((10#$start))
-    end=$((10#$end))
     while true; do
         # 计数器
         local idx=$end
         end=$(expr $end - 1)
-        # 遍历结束 start < end
+        # 遍历结束
         [[ $start -gt $idx ]] && break
         idx=$(printf "%010d" ${idx})
         # 检查文件夹是否存在
@@ -251,7 +367,13 @@ function ListRecycle() {
             echo "[$idx]: ${file}"
             break
         else
-            for p in $(find .${file} -maxdepth ${depth}); do
+            if [[ "$Pars_Start_Time" != "" ]]; then
+                files=$(find .${file} -maxdepth ${depth} -newermt "$Pars_Start_Time" ! -newermt "$Pars_End_Time")
+            else
+                files=$(find .${file} -maxdepth ${depth})
+            fi
+            for p in $files; do
+                [ -d $p ] && continue
                 p=${p:1}
                 echo "[$idx]: ${p}"
             done
@@ -263,38 +385,35 @@ function ListRecycle() {
 # 更新视图
 function ShowView() {
     local file=$1
-    local start=$2
-    local end=$3
     local OLDIFS="$IFS" #备份旧的IFS变量
     local dir_view=${RECYCLE_DIR}/view
     local pro=2
     local pro_str=""
-    local sum=$idx
-    IFS=$'\n' #修改分隔符为换行符
-    [[ "$start" = "" ]] && start=0
-    [[ "$end" = "" ]] && end=$idx
-    start=$((10#$start))
-    end=$((10#$end))
-    [[ $end > $sum ]] && end=$sum
+
+    GetPars $2 $3
+
     [[ "$file" = "" ]] && file="/"
     [[ ${file:0:1} = "/" ]] || file=$(realpath $file)
     [ -e "$dir_view/$file" ] && $DEL_EXEC -rf "$dir_view/$file"
-    sum=$(expr $end - $start)
-    echo "正在生成视图：$start - $end $file"
+
+    local start=$Pars_Start_idx
+    local end=$Pars_End_idx
+    local sum=$(expr $end - $start)
+    IFS=$'\n' #修改分隔符为换行符
     while true; do
         # 计数器
         local idx=$end
         end=$(expr $end - 1)
+        # 遍历结束
+        [[ $start -gt $idx ]] && break
         # 显示进度条
-        v=$(expr $(expr $sum - $end + $start) \* 100 / $sum)
+        v=$(expr $(expr $sum - $idx + $start) \* 100 / $sum)
         while [[ $v -ge $pro ]]; do
             pro=$(expr $pro + 2)
             pro_str+="="
         done
-        printf "[%-50s]%3d%%\r" $pro_str $v
-        # 遍历结束 start < end
-        [[ $start -gt $idx ]] && break
         idx=$(printf "%010d" ${idx})
+        printf " 正在生成视图: %s [%-50s] %3d%%\r" $idx $pro_str $v
         # 检查文件夹是否存在
         [ ! -d ${RECYCLE_DIR}/snapshoot/$idx ] && continue
         # 检查文件
@@ -308,13 +427,18 @@ function ShowView() {
                 if [ ! -d "${dir_view}${dir}" ]; then
                     # 文件夹不存在 创建文件夹
                     mkdir -p "${dir_view}${dir}" 2>/dev/null
-                    [[ "$?" != "0" ]] && echo "文件夹创建失败: ${dir_view}${dir}" && break
+                    [[ "$?" != "0" ]] && echo " [$idx]文件夹创建失败: ${dir_view}${dir}" && break
                 fi
                 ln ".$p" "${dir_view}${p}"
             fi
             break
         else
-            for p in $(find .${file}); do
+            if [[ "$Pars_Start_Time" != "" ]]; then
+                files=$(find .${file} -newermt "$Pars_Start_Time" ! -newermt "$Pars_End_Time")
+            else
+                files=$(find .${file})
+            fi
+            for p in $files; do
                 # 跳过文件夹
                 [ -d $p ] && continue
                 p=${p:1}
@@ -323,7 +447,7 @@ function ShowView() {
                     if [ ! -d "${dir_view}${dir}" ]; then
                         # 文件夹不存在 创建文件夹
                         mkdir -p "${dir_view}${dir}" 2>/dev/null
-                        [[ "$?" != "0" ]] && echo "文件夹创建失败: ${dir_view}${dir}" && continue
+                        [[ "$?" != "0" ]] && echo " [$idx]文件夹创建失败: ${dir_view}${dir}" && continue
                     fi
                     ln ".$p" "${dir_view}${p}"
                 fi
@@ -332,54 +456,7 @@ function ShowView() {
     done
     IFS="$OLDIFS" #还原IFS变量
     echo ""
-    return
-}
-
-# 查找快照
-function FindSnapshoot() {
-    local st=$1
-    local se=$2
-    local start=0
-    local end=$idx
-    local pro=2
-    local pro_str=""
-    local sum=$idx
-    local snapshoot_start="-1"
-    local snapshoot_end="-1"
-
-    [[ "$st" = "" ]] && st="1970-1-1"
-    [[ "$se" = "" ]] && se=$(date "+%Y-%m-%d" -d '+1 day')
-
-    echo "开始查找：$st - $se ..."
-    while true; do
-        # 计数器
-        local idx=$end
-        end=$(expr $end - 1)
-        # 显示进度条
-        v=$(expr $(expr $sum - $end) \* 100 / $sum)
-        while [[ $v -ge $pro ]]; do
-            pro=$(expr $pro + 2)
-            pro_str+="="
-        done
-        printf "[%-50s]%3d%%\r" $pro_str $v
-        # 遍历结束 start < end
-        [[ $start -gt $idx ]] && break
-        idx=$(printf "%010d" ${idx})
-        # 检查文件夹是否存在
-        [ ! -d ${RECYCLE_DIR}/snapshoot/$idx ] && continue
-        # 遍历文件
-        cd ${RECYCLE_DIR}/snapshoot/$idx
-        ret=$(find ./ -type f -newermt "$st" ! -newermt "$se" -print -quit)
-        if [[ "$ret" = "" ]]; then
-            [[ "$snapshoot_end" != "-1" ]] && break
-            continue
-        fi
-        [[ "$snapshoot_end" = "-1" ]] && snapshoot_end=$idx
-        snapshoot_start=$idx
-    done
-    echo ""
-    echo "存储点: $snapshoot_start - $snapshoot_end"
-    return
+    exit 0
 }
 
 # 检查功能
@@ -399,18 +476,23 @@ function CheckFun() {
         echo "实现回收站功能 1.0"
         echo "替代命令              : ln -s rm-recycle.sh /usr/local/bin/rm"
         echo "回收站路径            : ${RECYCLE_DIR}"
+        printf " 正在获取回收站大小...\r"
         echo "回收站已用大小        : $(du -sh ${RECYCLE_DIR} | awk '{print $1}')"
-        echo "最大存储点            : $idx"
+        echo "存储点                : $idx_min - $idx_max"
         echo "移动文件夹到回收站    :"
         echo "	rm xxx xxxx"
         echo "	rm -rf xxx/* xxx/*"
         echo "	rm -rf ../xxx ../xxx"
-        echo "清空回收站            : rm -clean [起始存储点] [结束存储点]"
-        echo "还原文件              : rm -reset 文件(夹) [起始存储点] [结束存储点]"
-        echo "查看回收站文件        : rm -list 文件(夹) [起始存储点] [结束存储点] [深度]"
-        echo "更新回收站视图        : rm -show [文件(夹)] [起始存储点] [结束存储点]"
+        echo "清空回收站            : rm -clean [起始存储点/起始时间 2019-1-1T00:00:00] [结束存储点/结束时间 2019-1-2T23:59:59]"
+        echo "清理回收站            : rm -clear 文件夹 文件表达式1;文件表达式2.. (<> 表示通配符)"
+        echo "  清理 后缀 .tmp 文件 rm -clear / \"<>.tmp\""
+        echo "  清理 1.txt 文件     rm -clear / \"1.txt\""
+        echo "  多个清理项目        rm -clear / \"<>.tmp;1.txt;2.txt\""
+        echo "还原文件              : rm -reset 文件(夹) [起始存储点/起始时间 2019-1-1T00:00:00] [结束存储点/结束时间 2019-1-2T23:59:59]"
+        echo "查看回收站文件        : rm -list 文件(夹) [起始存储点/起始时间 2019-1-1T00:00:00] [结束存储点/结束时间 2019-1-2T23:59:59] [深度]"
+        echo "更新回收站视图        : rm -show [文件(夹)] [起始存储点/起始时间 2019-1-1T00:00:00] [结束存储点/结束时间 2019-1-2T23:59:59]"
         echo "删除回收站视图        : rm -delshow"
-        echo "根据时间查找存储点    : rm -time [起始时间 2019-1-1T00:00:00] [结束时间 2019-1-2T23:59:59]"
+        echo "直接删除              : rm -del [文件(夹)]"
         _flag="end"
         ;;
     "-reset")
@@ -429,8 +511,11 @@ function CheckFun() {
         [ -e "${RECYCLE_DIR}/view/$file" ] && $DEL_EXEC -rf "${RECYCLE_DIR}/view/$file"
         _flag="end"
         ;;
-    "-time")
-        FindSnapshoot $2 $3
+    "-del")
+        _flag="del"
+        ;;
+    "-clear")
+        ClearRecycle $2 $3
         _flag="end"
         ;;
     *)
@@ -444,6 +529,9 @@ if [ ! -x $DEL_EXEC ]; then
     exit 1
 fi
 
+# 加锁保护
+Lock
+
 # 检查回收站是否存在
 if [ ! -d ${RECYCLE_DIR} ]; then
     mkdir -p ${RECYCLE_DIR}
@@ -451,15 +539,17 @@ if [ ! -d ${RECYCLE_DIR} ]; then
 fi
 
 # 获取索引
-[ ! -f ${RECYCLE_DIR}/snapshoot.idx ] && echo 1 >${RECYCLE_DIR}/snapshoot.idx
-idx=$(cat ${RECYCLE_DIR}/snapshoot.idx)
+[ ! -f ${RECYCLE_DIR}/snapshoot.max ] && echo 1 >${RECYCLE_DIR}/snapshoot.max && sync -f ${RECYCLE_DIR}/snapshoot.max
+[ ! -f ${RECYCLE_DIR}/snapshoot.min ] && echo 0 >${RECYCLE_DIR}/snapshoot.min && sync -f ${RECYCLE_DIR}/snapshoot.min
+idx_max=$(cat ${RECYCLE_DIR}/snapshoot.max)
+idx_min=$(cat ${RECYCLE_DIR}/snapshoot.min)
 DIR_LAST=''
 DIR_NEW=''
-if [[ "$idx" = "" ]]; then
+if [[ "$idx_max" = "" ]]; then
     DIR_NEW=$(printf "%010d" 0)
     DIR_LAST=$DIR_NEW
 else
-    idx=$((10#$idx)) # 去除前面的0
+    idx=$((10#$idx_max)) # 去除前面的0
     dir=$(printf "%010d" ${idx})
     ret=""
     if [ -d ${RECYCLE_DIR}/snapshoot/$dir ]; then
@@ -472,9 +562,9 @@ else
         DIR_LAST=$(printf "%010d" ${idx})
     else
         DIR_LAST=$(printf "%010d" ${idx})
-        idx=$(expr $idx + 1)
-        DIR_NEW=$(printf "%010d" $idx)
-        echo $idx >${RECYCLE_DIR}/snapshoot.idx
+        idx_max=$(expr $idx + 1)
+        DIR_NEW=$(printf "%010d" $idx_max)
+        echo $idx_max >${RECYCLE_DIR}/snapshoot.max && sync -f ${RECYCLE_DIR}/snapshoot.max
     fi
 fi
 DIR_LAST=${RECYCLE_DIR}/snapshoot/$DIR_LAST
@@ -486,6 +576,8 @@ for arg in "$@"; do
         _flag=$arg
         CheckFun $arg $2 $3 $4 $5
         [[ "$_flag" = "end" ]] && break
+    elif [[ "$_flag" = "del" ]]; then
+        $DEL_EXEC -rf "$arg" # 直接删除
     else
         # 获取绝对路径
         file=$(realpath $arg)
