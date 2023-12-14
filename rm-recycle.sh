@@ -493,6 +493,8 @@ function CheckFun() {
         echo "更新回收站视图        : rm -show [文件(夹)] [起始存储点/起始时间 2019-1-1T00:00:00] [结束存储点/结束时间 2019-1-2T23:59:59]"
         echo "删除回收站视图        : rm -delshow"
         echo "直接删除              : rm -del [文件(夹)]"
+        echo ""
+        echo "查看回收站大于10MB文件 : find ${RECYCLE_DIR}/snapshoot -type f -size +10M -exec du -h {} \;"
         _flag="end"
         ;;
     "-reset")
