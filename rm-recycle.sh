@@ -120,9 +120,9 @@ function Lock() {
         flock -w 1 200
         [[ "$?" = "0" ]] && break
         t=$(expr $t + 1)
-        printf " rm 其它程序正在使用 ... $t\r"
+        $is_Print && printf " rm 其它程序正在使用 ... $t\r"
     done
-    [[ $t -gt 0 ]] && printf "                            \r"
+    [[ $t -gt 0 ]] && $is_Print && printf "                            \r"
     return
 }
 
@@ -207,7 +207,7 @@ function CleanRecycle() {
 
     echo -n "清理回收站[Y/N]:"
     read isOk
-    [[ "$isOk" != "y" ]] && [[ "$isOk" != "Y" ]] && exit 0
+    [[ "$isOk" != "y" ]] && [[ "$isOk" != "Y" ]] && echo "取消操作" && exit 0
 
     if [[ "$1" = "" ]] && [[ "$2" = "" ]]; then
         ${DEL_EXEC} -rf ${RECYCLE_DIR}/*
@@ -258,8 +258,6 @@ function ClearRecycle() {
         str+=" -name \"${p/<>/*}\""
     done
     IFS=$OLDIFS
-    # echo sh -c "find \".${dir}\" $str | xargs $DEL_EXEC -rf"
-    # exit 0
     while true; do
         # 计数器
         local idx=$end
@@ -296,7 +294,7 @@ function ResetRecycle() {
 
     GetPars $2 $3
 
-    [[ "$file" = "" ]] && echo "参数错误" && return
+    [[ "$file" = "" ]] && echo "参数错误" && exit 1
     [ ${file:0:1} = "/" ] || file=$(realpath "$file")
     if [ -e "$file" ] && [ ! -d "$file" ]; then
         echo "文件已存在，无法还原：$file" >&2
@@ -309,9 +307,10 @@ function ResetRecycle() {
 
     echo -n "开始还原文件（$file）?[Y/N]"
     read isOk
-    [[ "$isOk" = "y" ]] && isOk='Y'
-    [[ "$isOk" != "Y" ]] && echo "取消还原操作" && exit 1
+    [[ "$isOk" != "Y" ]] && [[ "$isOk" != "y" ]] && echo "取消还原操作" && exit 1
 
+    local st=$(date +%s)
+    local count=0
     local OLDIFS="$IFS" #备份旧的IFS变量
     IFS=$'\n'           #修改分隔符为换行符
     while true; do
@@ -347,6 +346,7 @@ function ResetRecycle() {
             fi
             # 移动文件
             mv -n ".${p}" "${p}"
+            count=$((count + 1))
             break
         else
             # 遍历文件夹
@@ -371,6 +371,7 @@ function ResetRecycle() {
                 # 移动文件
                 mv -n ".${p}" "${p}"
                 [[ "$?" != "0" ]] && LOG_ERROR " [$idx]文件移动失败: ${p}" && continue
+                count=$((count + 1))
             done
         fi
     done
@@ -378,17 +379,30 @@ function ResetRecycle() {
     FixInfo
     IFS="$OLDIFS" #还原IFS变量
     echo ""
+    echo "还原完成: $count 个文件用时 $(expr $(date +%s) - $st)s"
     exit 0
 }
 
 # 列出回收站文件
+function ListRecycle_Print() {
+    local p=$1
+    local _OLDIFS="$IFS"
+    IFS=" "
+    str=$(ls -lh --time-style '+%Y-%m-%dT%H:%M:%S' "$p" | awk '{print $5,$6}')
+    strs=($str)
+    IFS=$_OLDIFS
+    p=${p:1}
+    printf "[%s]: %-6s %s %s\n" $idx ${strs[0]} ${strs[1]} "$p"
+    return
+}
+
 function ListRecycle() {
     local file=$1
     local depth=$4
 
     GetPars $2 $3
 
-    [[ "$file" = "" ]] && echo "参数错误" && return
+    [[ "$file" = "" ]] && echo "参数错误" && exit 1
     [[ ${file:0:1} = "/" ]] || file=$(realpath "$file")
     [[ "$depth" = "" ]] && depth=32767
 
@@ -410,8 +424,7 @@ function ListRecycle() {
         # 还原文件
         cd ${RECYCLE_DIR}/snapshoot/$idx
         if [ ! -d .${file} ]; then
-            echo "[$idx]: ${file}"
-            break
+            ListRecycle_Print ".${file}"
         else
             if [[ "$Pars_Start_Time" != "" ]]; then
                 files=$(find .${file} -maxdepth ${depth} -newermt "$Pars_Start_Time" ! -newermt "$Pars_End_Time")
@@ -420,12 +433,12 @@ function ListRecycle() {
             fi
             for p in $files; do
                 [ -d $p ] && continue
-                p=${p:1}
-                echo "[$idx]: ${p}"
+                ListRecycle_Print "$p"
             done
         fi
     done
     IFS="$OLDIFS" #还原IFS变量
+    exit 0
 }
 
 # 更新视图
@@ -433,6 +446,8 @@ function ShowView() {
     local file=$1
     local OLDIFS="$IFS" #备份旧的IFS变量
     local dir_view=${RECYCLE_DIR}/view
+    local st=$(date +%s)
+    local count=0
 
     GetPars $2 $3
 
@@ -471,6 +486,7 @@ function ShowView() {
                 n=${#p} && [[ $n -gt 50 ]] && n=50
                 printf " 正在生成视图: %s %3d%% %-50.50s \r" $idx $v ${p:0-$n:$n}
                 ln ".$p" "${dir_view}${p}"
+                count=$((count + 1))
             fi
             break
         else
@@ -493,12 +509,14 @@ function ShowView() {
                     n=${#p} && [[ $n -gt 50 ]] && n=50
                     printf " 正在生成视图: %s %3d%% %-50.50s \r" $idx $v ${p:0-$n:$n}
                     ln ".$p" "${dir_view}${p}"
+                    count=$((count + 1))
                 fi
             done
         fi
     done
     IFS="$OLDIFS" #还原IFS变量
     echo ""
+    echo " 生成视图结束: $count 个文件用时 $(expr $(date +%s) - $st)s"
     exit 0
 }
 
@@ -522,7 +540,7 @@ function CheckFun() {
         echo "	rm -rf xxx/* xxx/*"
         echo "	rm -rf ../xxx ../xxx"
         echo "清空回收站            : rm -clean [起始存储点/起始时间 2019-1-1T00:00:00] [结束存储点/结束时间 2019-1-2T23:59:59]"
-        echo "清理回收站            : rm -clear 文件夹 文件表达式1;文件表达式2.. (<> 表示通配符)"
+        echo "清理回收站            : rm -clear 文件(夹) 文件表达式1;文件表达式2.. (<> 表示通配符)"
         echo "  清理 后缀 .tmp 文件 rm -clear / \"<>.tmp\""
         echo "  清理 1.txt 文件     rm -clear / \"1.txt\""
         echo "  多个清理项目        rm -clear / \"<>.tmp;1.txt;2.txt\""
@@ -559,16 +577,6 @@ function CheckFun() {
         ClearRecycle $2 $3
         _flag="end"
         ;;
-    "-f")
-        is_Print=false
-        ;;
-    "-r")
-        is_del_dir=true
-        ;;
-    "-rf" | "-fr")
-        is_Print=false
-        is_del_dir=true
-        ;;
     *)
         return 0
         ;;
@@ -576,9 +584,19 @@ function CheckFun() {
 }
 
 if [ ! -x $DEL_EXEC ]; then
-    LOG_ERROR "找不到删除程序：rm"
+    LOG_ERROR "找不到删除程序: $DEL_EXEC"
     exit 1
 fi
+
+echo "-------------------------------- $(date) --------------------------------" >>$RECYCLE_LOG
+echo "dir: $(pwd)" >>$RECYCLE_LOG
+for arg in "$@"; do
+    echo -n "$arg " >>$RECYCLE_LOG
+    [[ $arg = "-f" ]] && is_Print=false
+    [[ $arg = "-r" ]] && is_del_dir=true
+    [[ $arg = "-rf" ]] || [[ $arg = "-fr" ]] && is_Print=false && is_del_dir=true
+done
+echo "" >>$RECYCLE_LOG
 
 # 加锁保护
 Lock
@@ -626,13 +644,6 @@ else
 fi
 DIR_LAST=${RECYCLE_DIR}/snapshoot/$DIR_LAST
 DIR_NEW=${RECYCLE_DIR}/snapshoot/$DIR_NEW
-
-echo "-------------------------------- $(date) --------------------------------" >>$RECYCLE_LOG
-echo "dir: $(pwd)" >>$RECYCLE_LOG
-for arg in "$@"; do
-    echo -n "$arg " >>$RECYCLE_LOG
-done
-echo "" >>$RECYCLE_LOG
 
 # 预处理参数
 for arg in "$@"; do
