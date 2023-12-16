@@ -36,7 +36,7 @@ ProtectionList=( # 保护文件夹列表
 ## ----------------------------------   END   ---------------------------------- ##
 
 set -f # 关闭通配符
-idx_max=1
+idx_max=0
 idx_min=0
 _flag=' ' # 功能标志
 _RECYCLE_DIR=$(realpath $RECYCLE_DIR)
@@ -111,25 +111,43 @@ function GetPars() {
     return
 }
 
-LOCKFILE="/var/lock/$(basename $0).lock"
-exec 200<>$LOCKFILE
+_LOCK_IDX=200  # 索引保护
+_LOCK_VIEW=201 # 视图
 
-# 加锁
+_lockfiles=("/dev/shm/.recycle.idx.lock" "/dev/shm/.recycle.view.lock")
+exec 200<>${_lockfiles[0]}
+exec 201<>${_lockfiles[1]}
+
+# 加锁 type number
 function Lock() {
+    local sn=$1
+    local fd=$sn
+    sn=$((sn - 200))
+    # 获取锁文件
+    local lockfile=${_lockfiles[$sn]}
     local t=0
     while true; do
-        flock -w 1 200
+        flock -w 1 $fd
         [[ "$?" = "0" ]] && break
-        t=$(expr $t + 1)
-        $is_Print && printf " rm 其它程序正在使用 ... $t\r"
+        if $is_Print; then
+            t=$(expr $t + 1)
+            pid=$(cat $lockfile)
+            str=$(tr -d '\0' </proc/$pid/cmdline 2>/dev/null)
+            printf " [%d]rm 其它程序正在使用 PID: %s %s \r" $t $pid "$str"
+        fi
     done
-    [[ $t -gt 0 ]] && $is_Print && printf "                            \r"
+    # 获得锁
+    echo $$ >$lockfile
+    [[ $t -gt 0 ]] && $is_Print && printf "%50s\r" ""
     return
 }
 
 # 解锁
 function UnLock() {
-    flock -u 200
+    local sn=$1
+    # 释放锁
+    flock -u $sn
+    return
 }
 
 # 检查
@@ -140,6 +158,8 @@ function CheckFile() {
     for p in ${ProtectionList[@]}; do
         [[ "$file" = "$p" ]] && echo "Fail" && return
     done
+    # 不回收临时文件
+    [[ $file =~ ^/tmp/ ]] && echo "Fail" && return
     # 自身保护/防止自身本删除
     # local base_dir=$(dirname $(realpath $0))
     # local dir=$(dirname $file)
@@ -149,9 +169,7 @@ function CheckFile() {
 
 # 删除文件
 function DeleteFile() {
-    local dir_last=$1
-    local dir_new=$2
-    local file=$3
+    local file=$1
     [ -d $file ] && ! $is_del_dir && LOG_WARN "文件夹无法删除: $file" && return
     # 检查文件是否保护
     local ret=$(CheckFile $file)
@@ -160,26 +178,32 @@ function DeleteFile() {
     if [[ "$f_dir" =~ ^$_RECYCLE_DIR.* ]]; then
         $DEL_EXEC -rf $file # 删除回收站文件
     else
-        # 检查上一个存储点是否有空的位置
-        if [[ "$dir_last" != "" ]] && [ ! -e "${dir_last}${file}" ]; then
-            if [ ! -d "${dir_last}${f_dir}" ]; then
-                # 创建文件夹
-                mkdir -p "${dir_last}${f_dir}" 2>/dev/null
-                [[ "$?" != "0" ]] && LOG_ERROR "文件夹创建失败: ${dir_last}${f_dir}" && return
+        local isRun=true
+        while $isRun; do
+            local dir=${RECYCLE_DIR}/snapshoot/$(printf "%010d" ${idx_max})
+            # 检查 存储点是否有空的位置
+            if [ ! -e "${dir}${file}" ]; then
+                # 可以存储
+                if [ ! -d "${dir}${f_dir}" ]; then
+                    # 检查max编号
+                    Lock $_LOCK_IDX
+                    if [[ $idx_max -gt $(cat ${RECYCLE_DIR}/snapshoot.max) ]]; then
+                        # 写入索引
+                        echo $idx_max >${RECYCLE_DIR}/snapshoot.max && sync -f ${RECYCLE_DIR}/snapshoot.max
+                    fi
+                    UnLock $_LOCK_IDX
+                    # 创建文件夹
+                    mkdir -p "${dir}${f_dir}" 2>/dev/null
+                    [[ "$?" != "0" ]] && LOG_ERROR "文件夹创建失败: ${dir}${f_dir}" && exit 1
+                fi
+                echo "MOVE $file -> $dir_new" >>$RECYCLE_LOG
+                mv -f "$file" "${dir}${f_dir}/"
+                isRun=false
+            else
+                # 生成新一个编号
+                idx_max=$((idx_max + 1))
             fi
-            echo "MOVE $file -> $dir_new" >>$RECYCLE_LOG
-            mv -f "$file" "${dir_last}${f_dir}/"
-        else
-            # 使用新的存储点
-            if [ ! -d "${dir_new}${f_dir}" ]; then
-                # 创建文件夹
-                mkdir -p "${dir_new}${f_dir}" 2>/dev/null
-                [[ "$?" != "0" ]] && LOG_ERROR "文件夹创建失败: ${dir_new}${f_dir}" && return
-            fi
-            echo "MOVE $file -> $dir_new" >>$RECYCLE_LOG
-            mv -f "$file" "${dir_new}${f_dir}/"
-            dir_last="" # 一旦使用新的存储就不能使用之前的
-        fi
+        done
     fi
     return
 }
@@ -187,6 +211,7 @@ function DeleteFile() {
 # 修正信息
 function FixInfo() {
     # 删除所有空的目录
+    Lock $_LOCK_IDX
     find ${RECYCLE_DIR}/snapshoot -type d -empty -delete
     local start=$idx_min
     local end=$idx_max
@@ -197,28 +222,52 @@ function FixInfo() {
         start=$(expr $start + 1)
     done
     echo $start >${RECYCLE_DIR}/snapshoot.min && sync -f ${RECYCLE_DIR}/snapshoot.min
+    UnLock $_LOCK_IDX
     return
 }
 
 # 清空文件夹
 function CleanRecycle() {
     local dir=""
+    local file=$1
     local isOk=
-    GetPars $1 $2
+    GetPars $2 $3
 
-    echo -n "清理回收站[Y/N]:"
+    echo -n "清理回收站($file)[Y/N]:"
     read isOk
     [[ "$isOk" != "y" ]] && [[ "$isOk" != "Y" ]] && echo "取消操作" && exit 0
 
-    if [[ "$1" = "" ]] && [[ "$2" = "" ]]; then
+    local pro=2
+    local pro_str=""
+    local start=$idx_min
+    local end=$idx_max
+    local sum=$(expr $end - $start)
+    local OLDIFS="$IFS" #备份旧的IFS变量
+    IFS=$'\n'           #修改分隔符
+
+    if [[ "$1" = "" ]]; then
         ${DEL_EXEC} -rf ${RECYCLE_DIR}/*
     elif [[ "$Pars_Start_Time" != "" ]]; then
-        cd ${RECYCLE_DIR}/snapshoot
-        for p in $(find ./ -newermt "$Pars_Start_Time" ! -newermt "$Pars_End_Time"); do
-            [ -d $p ] && continue
-            n=${#p} && [[ $n -gt 50 ]] && n=50
-            printf "删除文件: %-50.50s\r" ${p:0-$n:$n}
-            $DEL_EXEC -rf "$p"
+        while true; do
+            # 计数器
+            local idx=$end
+            end=$(expr $end - 1)
+            # 遍历结束
+            [[ $start -gt $idx ]] && break
+            # 显示进度条
+            v=$(expr $(expr $sum - $idx + $start) \* 100 / $sum)
+            idx=$(printf "%010d" ${idx})
+            # 检查文件夹是否存在
+            [ ! -d ${RECYCLE_DIR}/snapshoot/$idx ] && continue
+            # 检查文件
+            [ ! -e ${RECYCLE_DIR}/snapshoot/${idx}${dir} ] && continue
+            cd ${RECYCLE_DIR}/snapshoot/$idx
+            for p in $(find .${file} -newermt "$Pars_Start_Time" ! -newermt "$Pars_End_Time"); do
+                [ -d $p ] && continue
+                n=${#p} && [[ $n -gt 50 ]] && n=50
+                printf "删除文件: %s %3d%% %-50.50s\r" $idx $v ${p:0-$n:$n}
+                $DEL_EXEC -rf "$p"
+            done
         done
         FixInfo
     elif [[ "$Pars_Start_idx" != "" ]]; then
@@ -451,6 +500,7 @@ function ShowView() {
     local count=0
 
     GetPars $2 $3
+    Lock $_LOCK_VIEW
 
     [[ "$file" = "" ]] && file="/"
     [[ ${file:0:1} = "/" ]] || file=$(realpath "$file")
@@ -515,6 +565,7 @@ function ShowView() {
             done
         fi
     done
+    UnLock $_LOCK_VIEW
     IFS="$OLDIFS" #还原IFS变量
     echo ""
     echo " 生成视图结束: $count 个文件用时 $(expr $(date +%s) - $st)s"
@@ -526,7 +577,7 @@ function CheckFun() {
     local fun=$1
     case "$fun" in
     "-clean")
-        CleanRecycle $2 $3
+        CleanRecycle $2 $3 $4
         _flag="end"
         ;;
     "-help" | "--help")
@@ -540,7 +591,7 @@ function CheckFun() {
         echo "	rm xxx xxxx"
         echo "	rm -rf xxx/* xxx/*"
         echo "	rm -rf ../xxx ../xxx"
-        echo "清空回收站            : rm -clean [起始存储点/起始时间 2019-1-1T00:00:00] [结束存储点/结束时间 2019-1-2T23:59:59]"
+        echo "清空回收站            : rm -clean [文件(夹)] [起始存储点/起始时间 2019-1-1T00:00:00] [结束存储点/结束时间 2019-1-2T23:59:59]"
         echo "清理回收站            : rm -clear 文件(夹) 文件表达式1;文件表达式2.. (<> 表示通配符)"
         echo "  清理 后缀 .tmp 文件 rm -clear / \"<>.tmp\""
         echo "  清理 1.txt 文件     rm -clear / \"1.txt\""
@@ -567,7 +618,9 @@ function CheckFun() {
         _flag="end"
         ;;
     "-delshow")
+        Lock $_LOCK_VIEW
         [ -e "${RECYCLE_DIR}/view/$file" ] && $DEL_EXEC -rf "${RECYCLE_DIR}/view/$file"
+        UnLock $_LOCK_VIEW
         _flag="end"
         ;;
     "-del")
@@ -599,9 +652,6 @@ for arg in "$@"; do
 done
 echo "" >>$RECYCLE_LOG
 
-# 加锁保护
-Lock
-
 # 检查回收站路径
 [ "${RECYCLE_DIR}" = "" ] && echo "回收站路径不能为空" >&2 && exit 1
 
@@ -611,19 +661,18 @@ if [ ! -d ${RECYCLE_DIR} ]; then
     [[ "$?" != "0" ]] && exit $?
 fi
 
+Lock $_LOCK_IDX # 保护索引
 # 没有快照就清空回收站
 [ ! -d ${RECYCLE_DIR}/snapshoot ] && $DEL_EXEC -rf ${RECYCLE_DIR}/*
 
 # 获取索引
-[ ! -f ${RECYCLE_DIR}/snapshoot.max ] && echo 1 >${RECYCLE_DIR}/snapshoot.max && sync -f ${RECYCLE_DIR}/snapshoot.max
+[ ! -f ${RECYCLE_DIR}/snapshoot.max ] && echo 0 >${RECYCLE_DIR}/snapshoot.max && sync -f ${RECYCLE_DIR}/snapshoot.max
 [ ! -f ${RECYCLE_DIR}/snapshoot.min ] && echo 0 >${RECYCLE_DIR}/snapshoot.min && sync -f ${RECYCLE_DIR}/snapshoot.min
 idx_max=$(cat ${RECYCLE_DIR}/snapshoot.max)
 idx_min=$(cat ${RECYCLE_DIR}/snapshoot.min)
-DIR_LAST=''
-DIR_NEW=''
+
 if [[ "$idx_max" = "" ]]; then
-    DIR_NEW=$(printf "%010d" 0)
-    DIR_LAST=$DIR_NEW
+    idx_max=0
 else
     idx=$((10#$idx_max)) # 去除前面的0
     dir=$(printf "%010d" ${idx})
@@ -633,18 +682,12 @@ else
         ret=$(ls -A ${RECYCLE_DIR}/snapshoot/$dir)
     fi
     if [[ "$ret" = "" ]]; then
-        DIR_NEW=$(printf "%010d" $idx)
         idx=$(expr $idx - 1)
-        DIR_LAST=$(printf "%010d" ${idx})
     else
-        DIR_LAST=$(printf "%010d" ${idx})
         idx_max=$(expr $idx + 1)
-        DIR_NEW=$(printf "%010d" $idx_max)
-        echo $idx_max >${RECYCLE_DIR}/snapshoot.max && sync -f ${RECYCLE_DIR}/snapshoot.max
     fi
 fi
-DIR_LAST=${RECYCLE_DIR}/snapshoot/$DIR_LAST
-DIR_NEW=${RECYCLE_DIR}/snapshoot/$DIR_NEW
+UnLock $_LOCK_IDX
 
 # 预处理参数
 for arg in "$@"; do
@@ -665,7 +708,7 @@ for arg in "$@"; do
         file=$(realpath "$arg" 2>>$RECYCLE_LOG)
         echo "$arg => ${file}" >>$RECYCLE_LOG
         [ ! -e "$file" ] && LOG_WARN "文件不存在!" && continue
-        DeleteFile $DIR_LAST $DIR_NEW $file
+        DeleteFile $file
     fi
 done
 exit 0
