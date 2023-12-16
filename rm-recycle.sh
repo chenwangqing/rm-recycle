@@ -221,6 +221,7 @@ function FixInfo() {
         [ -d $dir ] && break
         start=$(expr $start + 1)
     done
+    [[ $start -gt $end ]] && start=$end
     echo $start >${RECYCLE_DIR}/snapshoot.min && sync -f ${RECYCLE_DIR}/snapshoot.min
     UnLock $_LOCK_IDX
     return
@@ -245,7 +246,8 @@ function CleanRecycle() {
     local OLDIFS="$IFS" #备份旧的IFS变量
     IFS=$'\n'           #修改分隔符
 
-    if [[ "$1" = "" ]]; then
+    if [[ "$file" = "" ]]; then
+        set +f
         ${DEL_EXEC} -rf ${RECYCLE_DIR}/*
     elif [[ "$Pars_Start_Time" != "" ]]; then
         while true; do
@@ -271,12 +273,20 @@ function CleanRecycle() {
         done
         FixInfo
     elif [[ "$Pars_Start_idx" != "" ]]; then
+        sum=$(expr $Pars_End_idx - $Pars_Start_idx)
         while true; do
             # 遍历结束
             [[ $Pars_Start_idx -gt $Pars_End_idx ]] && break
+            v=$(expr $(expr $sum - $Pars_End_idx + $Pars_Start_idx) \* 100 / $sum)
+            while [[ $v -ge $pro ]]; do
+                pro=$(expr $pro + 2)
+                pro_str+="="
+            done
+            idx=$(printf "%010d" ${Pars_Start_idx})
+            printf " 正在清理: %s [%-50s] %3d%%\r" $idx $pro_str $v
             # 检查文件夹是否存在
-            dir=${RECYCLE_DIR}/snapshoot/$(printf "%010d" $Pars_Start_idx)
-            [ -d $dir ] && ${DEL_EXEC} -rf "$dir"
+            dir=${RECYCLE_DIR}/snapshoot/$idx/$file
+            [ -e "$dir" ] && $DEL_EXEC -rf "$dir"
             # 计数器增加
             Pars_Start_idx=$(expr $Pars_Start_idx + 1)
         done
