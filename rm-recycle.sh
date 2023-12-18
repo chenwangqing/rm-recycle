@@ -717,7 +717,7 @@ for arg in "$@"; do
         # 获取绝对路径
         file=$(realpath "$arg" 2>>$RECYCLE_LOG)
         echo "$arg => ${file}" >>$RECYCLE_LOG
-        [ ! -e "$file" ] && LOG_WARN "文件不存在!" && continue
+        [ ! -e "$file" ] && LOG_WARN "文件不存在: $file" && continue
         DeleteFile $file
     fi
 done
