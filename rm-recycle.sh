@@ -129,9 +129,19 @@ function UnLock() {
 # --------------------------------------------------------------------------------
 
 function SQL_Exec() {
-    echo "[SQL] $1" >>$RECYCLE_LOG
+    local str=$1
+    local sql_file=/dev/shm/.recycle.$$.sql
+    [[ $str == "" ]] && return 1
+    # echo "[SQL] $str" >>$RECYCLE_LOG
+    # 参数太多就只能写到文件在执行
+    [[ ${#str} -gt 65536 ]] && echo "$str" >$sql_file && str=""
     Lock $_LOCK_SQL
-    sqlite3 ${RECYCLE_DIR}/infos.db "$1"
+    if [[ "$str" != "" ]]; then
+        sqlite3 ${RECYCLE_DIR}/infos.db "$str"
+    else
+        sqlite3 ${RECYCLE_DIR}/infos.db <$sql_file
+        $DEL_EXEC -rf $sql_file
+    fi
     local ret=$?
     UnLock $_LOCK_SQL
     return $ret
@@ -521,10 +531,57 @@ function ResetRecycle() {
     exit 0
 }
 
+# 4 => 4K 1024 => 1M
+function NumberToStr() {
+    local size=$1 # KB
+    local zs=$size
+    local xs=0
+    local flag="K"
+    if [[ $size -gt 1048576 ]]; then # GB
+        zs=$((size / 1048576))
+        xs=$(((size % 1048576) * 1000 / 1048576))
+        flag="G"
+    elif [[ $size -gt 1024 ]]; then # MB
+        zs=$((size / 1024))
+        xs=$(((size % 1024) * 1000 / 1024))
+        flag="M"
+    fi
+    echo $zs.$xs$flag
+    return 0
+}
+
+# 4.0K => 4 1M => 1024
+function StrToNumber() {
+    local str=$1
+    local str_len=${#str}
+    str_len=$((str_len - 1))
+    [[ $str_len -le 0 ]] && echo $str && return 0
+    local flag=${ret:0-1:1}
+    str=${ret:0:$str_len}
+    local zs=$str
+    local xs=0
+    if [[ $str =~ \. ]]; then
+        zs=${str%.*}
+        xs=${str#*.}
+    fi
+    local sz=1
+    local _sz=1
+    if [[ "$flag" = "G" ]]; then
+        sz=1048576
+        _sz=1024
+    elif [[ "$flag" = "M" ]]; then
+        sz=1024
+        _sz=1
+    fi
+    echo $((zs * sz + xs * _sz))
+    return 0
+}
+
 function ListRecycle() {
     local file=${Pars["-"]}
     local st=$((10#${Pars["st"]}))
     local et=$((10#${Pars["et"]}))
+    local size=0
 
     [[ "$file" = "" ]] && echo "参数错误" && exit 1
     [[ ${file:0:1} = "/" ]] || file=$(realpath "$file")
@@ -542,7 +599,9 @@ function ListRecycle() {
         local ret=$(du -sh "$DIR_STORAGE/$uuid" 2>/dev/null | awk '{print $1}')
         [[ "$ret" = "" ]] && CheckUuid $uuid && continue
         printf "%-8s %s %s %s\n" "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') "$uuid" "$file"
+        size=$(expr $(StrToNumber $ret) + $size)
     done
+    echo "总大小：$(NumberToStr $size)"
     exit 0
 }
 
@@ -553,6 +612,7 @@ function HistoryRecycle() {
     local st=$((10#${Pars["st"]}))
     local et=$((10#${Pars["et"]}))
     local idx=0
+    local size=0
 
     [[ "$file" = "" ]] && echo "参数错误" && exit 1
     [[ ${file:0:1} = "/" ]] || file=$(realpath "$file")
@@ -569,8 +629,10 @@ function HistoryRecycle() {
         local ret=$(du -sh "$DIR_STORAGE/$uuid" 2>/dev/null | awk '{print $1}')
         [[ "$ret" = "" ]] && CheckUuid $uuid && continue
         printf "%-4d %-8s %s  %s\n" $idx "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') $uuid
+        size=$(expr $(StrToNumber $ret) + $size)
         idx=$((idx + 1))
     done
+    echo "总大小：$(NumberToStr $size)"
     exit 0
 }
 
@@ -590,14 +652,15 @@ function ShowView() {
     if [[ "$uuids" = "" ]]; then
         [[ "$file" = "" ]] && file="/"
         [[ ${file:0:1} = "/" ]] || file=$(realpath "$file")
-        [ -e "$dir_view/$file" ] && $DEL_EXEC -rf "$dir_view/$file"
         echo "[$st - $et] $file:"
         list=$(SQL_Search_time_files $st $et "$file")
     else
-        [ -e "$dir_view" ] && $DEL_EXEC -rf "$dir_view"
         list=$(SQL_Search_uuids $uuids)
+        file="/"
     fi
 
+    Lock $_LOCK_VIEW
+    [ -e "$dir_view/$file" ] && $DEL_EXEC -rf "$dir_view/$file"
     count=$(echo $list | grep -v "^$" | wc -l)
     idx=0
     IFS=$'\n' #修改分隔符为换行符
@@ -655,8 +718,9 @@ function ShowView() {
             _count=$((_count + 1))
         fi
     done
+    UnLock $_LOCK_VIEW
     echo ""
-    echo "生成视图完成：用时 $(expr $(date +%s) - $_t) s 生成 $_count 个文件"
+    echo "生成视图完成：用时 $(expr $(date +%s) - $_t) s 生成 $_count 个文件 $dir_view"
     exit 0
 }
 
@@ -713,7 +777,7 @@ function CheckFun() {
     [ -v Pars["rf"] ] || [ -v Pars["fr"] ] && is_del_dir=true && is_Print=false
 
     if [ -v Pars["help"] ]; then
-        echo "实现回收站功能 1.0"
+        echo "实现回收站功能 2.0"
         echo "替代命令              : ln -s rm-recycle.sh /usr/local/bin/rm"
         echo "回收站路径            : ${RECYCLE_DIR}"
         echo "移动文件夹到回收站    :"
