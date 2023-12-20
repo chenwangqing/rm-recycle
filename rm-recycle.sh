@@ -352,7 +352,7 @@ function DeleteFiles() {
         mv -f "$file" "$DIR_STORAGE/$uuid"
         [[ $? -ne 0 ]] && echo "移动文件失败: $file" && exit 1
     done
-    SQL_DeleteToUuids "$del_uuids"
+    [[ "$del_uuids" != "" ]] && SQL_DeleteToUuids "$del_uuids"
     exit 0
 }
 
