@@ -253,6 +253,13 @@ function SQL_DeleteToUuids() {
     return $?
 }
 
+# 获取记录数量
+function SQL_GetCount()
+{
+    SQL_Exec "SELECT count(*) FROM info;"
+    return $?
+}
+
 # 检查uuid
 function CheckUuid() {
     local uuid=$1
@@ -322,7 +329,7 @@ function CleanRecycle() {
             read isOk
             [[ "$isOk" != "y" ]] && [[ "$isOk" != "Y" ]] && echo "取消操作" && exit 0
             # 删除所有
-            $DEL_EXEC -rf "${RECYCLE_DIR}"
+            $DEL_EXEC -rf "${RECYCLE_DIR}/storage" "${RECYCLE_DIR}/view" "${RECYCLE_DIR}/infos.db"
             exit 0
         fi
         [[ "$file" = "" ]] && file="/"
@@ -543,6 +550,8 @@ function ShowView() {
     local dir_view=${RECYCLE_DIR}/view
     local count=0
     local idx=0
+    local _t=$(date +%s)
+    local _count=0
 
     local list=
     if [[ "$uuids" = "" ]]; then
@@ -591,6 +600,7 @@ function ShowView() {
                 fi
                 ln "$DIR_STORAGE/$uuid$fs" "$dst"
                 [[ $? -ne 0 ]] && LOG_ERROR " 移动文件失败: $dst" && continue
+                _count=$((_count + 1))
             done
         else
             local dst=$dir_view/$file
@@ -609,9 +619,11 @@ function ShowView() {
             fi
             ln "$DIR_STORAGE/$uuid" "$dst"
             [[ $? -ne 0 ]] && LOG_ERROR " 移动文件失败: $dst" && continue
+            _count=$((_count + 1))
         fi
     done
     echo ""
+    echo "生成视图完成：用时 $(expr $(date +%s) - $_t) s 生成 $_count 个文件"
     exit 0
 }
 
@@ -626,7 +638,6 @@ function CheckFun() {
             if [[ "$p" =~ = ]]; then
                 key=${p%=*}
                 p=${p##*=}
-                echo "key: $key value: $p"
                 Pars["$key"]="$p"
             else
                 Pars["$p"]=""
@@ -694,7 +705,7 @@ function CheckFun() {
         echo "清理回收站            : rm -clean [文件/夹] [-uuid] [-st] [-et] [-filter]"
         echo "直接删除              : rm -del [文件(夹)]"
         printf " 正在获取回收站大小...\r"
-        echo "回收站已用大小        : $(du -sh ${RECYCLE_DIR} | awk '{print $1}')"
+        echo "回收站已用大小        : $(du -sh ${RECYCLE_DIR} | awk '{print $1}') [$(SQL_GetCount)]"
     elif [ -v Pars["list"] ]; then
         ListRecycle
     elif [ -v Pars["hist"] ]; then
