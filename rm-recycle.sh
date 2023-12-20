@@ -46,6 +46,10 @@ is_Print=true    # 显示
 
 declare -A Pars # <k> "v1 \n v2 \n .."
 
+# --------------------------------------------------------------------------------
+#                               | 日志操作 |
+# --------------------------------------------------------------------------------
+
 _LOG_COLORS=('' '\033[33m' '\033[31m')
 _LOG_NC='\033[0m'
 
@@ -76,6 +80,10 @@ function LOG_ERROR() {
     _log_out 2 "$@"
     return $?
 }
+
+# --------------------------------------------------------------------------------
+#                                   | 锁 |
+# --------------------------------------------------------------------------------
 
 _LOCK_SQL=200  # 索引保护
 _LOCK_VIEW=201 # 视图
@@ -121,6 +129,7 @@ function UnLock() {
 # --------------------------------------------------------------------------------
 
 function SQL_Exec() {
+    echo "[SQL] $1" >>$RECYCLE_LOG
     Lock $_LOCK_SQL
     sqlite3 ${RECYCLE_DIR}/infos.db "$1"
     UnLock $_LOCK_SQL
@@ -153,17 +162,51 @@ function SQL_Search_time_files() {
     local ts=$1
     local te=$2
     local name=$3
+    local isAbroad=$4 # 广泛
     local limit=$((10#${Pars["n"]}))
+    IFS=$';' #修改分隔符
+    local filter=(${Pars["filter"]})
+    local nfilter=(${Pars["!filter"]})
     [[ $limit -ne 0 ]] && limit="LIMIT $limit" || limit=""
-    local n=${#name}
-    n=$((n - 1))
-    local file=${name:0:$n}
-    local cmd="SELECT uuid,time,name FROM info WHERE id in (SELECT max(id) as id FROM info WHERE 
+    local file=$name
+    if [[ "${name:0-1:1}" = "/" ]]; then
+        local n=${#name}
+        n=$((n - 1))
+        file=${name:0:$n}
+    fi
+    local str=""
+    if [[ ${#filter[@]} -ne 0 ]]; then
+        for p in ${filter[@]}; do
+            [[ $str != "" ]] && str+=" or "
+            str+="name like '$p'"
+        done
+        str="and ($str) "
+    fi
+    if [[ ${#nfilter[@]} -ne 0 ]]; then
+        local s=""
+        for p in ${nfilter[@]}; do
+            [[ $s != "" ]] && s+=" or "
+            s+="name like '$p'"
+        done
+        str+="and not ($s) "
+    fi
+    if [[ "$isAbroad" = "" ]]; then
+        local cmd="SELECT uuid,time,name FROM info WHERE id in (SELECT max(id) as id FROM info WHERE 
             (name like \"$name%\" or name = \"$file\")
             and time >= $ts 
             and time <= $te 
+            $str
             GROUP BY name) ORDER BY id DESC $limit;"
-    SQL_Exec "$cmd"
+        SQL_Exec "$cmd"
+    else
+        # 广泛
+        local cmd="SELECT uuid,time,name FROM info WHERE 
+            (name like \"$name%\" or name = \"$file\")
+            and time >= $ts 
+            and time <= $te 
+            $str;"
+        SQL_Exec "$cmd"
+    fi
     return $?
 }
 
@@ -203,12 +246,23 @@ function SQL_DeleteToUuid() {
     return $?
 }
 
+# 删除uuid
+function SQL_DeleteToUuids() {
+    local uuids=$1
+    SQL_Exec "DELETE FROM info WHERE uuid in ($uuids);"
+    return $?
+}
+
 # 检查uuid
 function CheckUuid() {
     local uuid=$1
     [ ! -e "$DIR_STORAGE/$uuid" ] && SQL_DeleteToUuid $uuid
     return 0
 }
+
+# --------------------------------------------------------------------------------
+#                                | 文件操作 |
+# --------------------------------------------------------------------------------
 
 # 检查
 function CheckFile() {
@@ -254,129 +308,128 @@ function DeleteFile() {
 
 # 清空文件夹
 function CleanRecycle() {
-    local dir=""
-    local file=$1
-    local isOk=
-    GetPars ${@:2}
+    local file=${Pars["-"]}
+    local st=$((10#${Pars["st"]}))
+    local et=$((10#${Pars["et"]}))
+    local uuids=${Pars["uuid"]}
+    local isOk=false
+    local files=""
+    local idx=0
 
-    echo -n "清理回收站($file)[Y/N]:"
+    if [[ "$uuids" = "" ]]; then
+        if [[ $st -ge 0 ]] && [[ $et -ge $(date +%s) ]] && [[ "$file" = "" ]]; then
+            echo -n "将清空整个回收站[Y/N]:"
+            read isOk
+            [[ "$isOk" != "y" ]] && [[ "$isOk" != "Y" ]] && echo "取消操作" && exit 0
+            # 删除所有
+            $DEL_EXEC -rf "${RECYCLE_DIR}"
+            exit 0
+        fi
+        [[ "$file" = "" ]] && file="/"
+        [ ${file:0:1} = "/" ] || file=$(realpath "$file")
+        echo "[$st - $et] $file:"
+        printf "正在搜索文件 ... \r"
+        files=$(SQL_Search_time_files $st $et "$file" 1)
+    else
+        printf -e "正在搜索文件 ... \r"
+        files=$(SQL_Search_uuids "$uuids")
+    fi
+
+    idx=0
+    IFS=$'\n' #修改分隔符为换行符
+    for p in $files; do
+        IFS=$'|'
+        local strs=($p)
+        [[ ${#strs[@]} -ne 3 ]] && continue
+        local uuid=${strs[0]}
+        local time=${strs[1]}
+        local file=${strs[2]}
+        local ret=$(du -sh "$DIR_STORAGE/$uuid" | awk '{print $1}' 2>/dev/null)
+        [[ "$ret" = "" ]] && continue
+        printf "%-8s %s %s %s\n" "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') $uuid "$file"
+        idx=$((idx + 1))
+        [[ $idx -gt 10 ]] && echo "..." && break
+    done
+
+    local count=$(echo $files | grep -v "^$" | wc -l)
+    [[ $count -eq 0 ]] && echo "没有找到文件" && exit 0
+
+    echo -n "清理回收站[Y/N]:"
     read isOk
     [[ "$isOk" != "y" ]] && [[ "$isOk" != "Y" ]] && echo "取消操作" && exit 0
 
-    local pro=2
-    local pro_str=""
-    local start=$idx_min
-    local end=$idx_max
-    local sum=$(expr $end - $start)
-    local OLDIFS="$IFS" #备份旧的IFS变量
-    IFS=$'\n'           #修改分隔符
-
-    if [[ "$file" = "" ]]; then
-        set +f
-        ${DEL_EXEC} -rf ${RECYCLE_DIR}/*
-    elif [[ "$Pars_Start_Time" != "" ]]; then
-        while true; do
-            # 计数器
-            local idx=$end
-            end=$(expr $end - 1)
-            # 遍历结束
-            [[ $start -gt $idx ]] && break
-            # 显示进度条
-            v=$(expr $(expr $sum - $idx + $start) \* 100 / $sum)
-            idx=$(printf "%010d" ${idx})
-            # 检查文件夹是否存在
-            [ ! -d ${RECYCLE_DIR}/snapshoot/$idx ] && continue
-            # 检查文件
-            [ ! -e ${RECYCLE_DIR}/snapshoot/${idx}${dir} ] && continue
-            cd ${RECYCLE_DIR}/snapshoot/$idx
-            for p in $(find .${file} -newermt "$Pars_Start_Time" ! -newermt "$Pars_End_Time"); do
-                [ -d $p ] && continue
-                n=${#p} && [[ $n -gt 50 ]] && n=50
-                printf "删除文件: %s %3d%% %-50.50s\r" $idx $v ${p:0-$n:$n}
-                $DEL_EXEC -rf "$p"
-            done
-        done
-        FixInfo
-    elif [[ "$Pars_Start_idx" != "" ]]; then
-        sum=$(expr $Pars_End_idx - $Pars_Start_idx)
-        while true; do
-            # 遍历结束
-            [[ $Pars_Start_idx -gt $Pars_End_idx ]] && break
-            v=$(expr $(expr $sum - $Pars_End_idx + $Pars_Start_idx) \* 100 / $sum)
-            while [[ $v -ge $pro ]]; do
-                pro=$(expr $pro + 2)
-                pro_str+="="
-            done
-            idx=$(printf "%010d" ${Pars_Start_idx})
-            printf " 正在清理: %s [%-50s] %3d%%\r" $idx $pro_str $v
-            # 检查文件夹是否存在
-            dir=${RECYCLE_DIR}/snapshoot/$idx/$file
-            [ -e "$dir" ] && $DEL_EXEC -rf "$dir"
-            # 计数器增加
-            Pars_Start_idx=$(expr $Pars_Start_idx + 1)
-        done
-        FixInfo
-    fi
+    idx=0
+    local uuids=""
+    IFS=$'\n' #修改分隔符为换行符
+    for p in $files; do
+        idx=$((idx + 1))
+        IFS=$'|'
+        local strs=($p)
+        [[ ${#strs[@]} -ne 3 ]] && continue
+        local uuid=${strs[0]}
+        local time=${strs[1]}
+        local file=${strs[2]}
+        local n=${#file}
+        [[ $n -gt 80 ]] && n=80
+        printf " [$idx/$count]正在删除: ${file:0-$n:$n}\r"
+        [ -e "$DIR_STORAGE/$uuid" ] && $DEL_EXEC -rf "$DIR_STORAGE/$uuid"
+        [[ $uuids != "" ]] && uuids+=","
+        uuids+="'$uuid'"
+        if [[ ${#uuids} -gt 1024 ]]; then
+            SQL_DeleteToUuids "$uuids"
+            uuids=""
+        fi
+    done
+    [[ "$uuids" != "" ]] && SQL_DeleteToUuids "$uuids"
     echo ""
     echo "回收站清理完成！"
     exit 0
 }
 
-# 清理回收站
-function ClearRecycle() {
-    local dir=$1
-    local suffix=$2
-    if [[ "$dir" = "" ]] || [[ "$suffix" = "" ]]; then
-        echo "参数错误" >&2
-        exit 1
+# 还原回收站
+function ResetRecycle() {
+    local file=${Pars["-"]}
+    local st=$((10#${Pars["st"]}))
+    local et=$((10#${Pars["et"]}))
+    local uuids=${Pars["uuid"]}
+    local isOk=false
+    local files=
+
+    if [[ "$uuids" = "" ]]; then
+        [[ "$file" = "" ]] && echo "参数错误" && exit 1
+        [ ${file:0:1} = "/" ] || file=$(realpath "$file")
+        if [ -e "$file" ] && [ ! -d "$file" ]; then
+            echo "文件已存在，无法还原：$file" >&2
+            exit 1
+        fi
+        echo "[$st - $et] $file:"
+        echo -e "正在搜索文件 ... \r"
+        files=$(SQL_Search_time_files $st $et "$file")
+    else
+        echo -e "正在搜索文件 ... \r"
+        files=$(SQL_Search_uuids "$uuids")
     fi
-    local pro=2
-    local pro_str=""
-    local start=$idx_min
-    local end=$idx_max
-    local sum=$(expr $end - $start)
-    local str=""
-    local OLDIFS="$IFS" #备份旧的IFS变量
-    IFS=$';'            #修改分隔符
-    for p in $suffix; do
-        [[ "$str" != "" ]] && str+=" -o"
-        str+=" -name \"${p//<>/*}\""
-    done
-    IFS=$OLDIFS
-    while true; do
-        # 计数器
-        local idx=$end
-        end=$(expr $end - 1)
-        # 遍历结束
-        [[ $start -gt $idx ]] && break
-        # 显示进度条
-        v=$(expr $(expr $sum - $idx + $start) \* 100 / $sum)
-        while [[ $v -ge $pro ]]; do
-            pro=$(expr $pro + 2)
-            pro_str+="="
-        done
-        idx=$(printf "%010d" ${idx})
-        printf " 正在清理: %s [%-50s] %3d%%\r" $idx $pro_str $v
-        # 检查文件夹是否存在
-        [ ! -d ${RECYCLE_DIR}/snapshoot/$idx ] && continue
-        # 检查文件
-        [ ! -e ${RECYCLE_DIR}/snapshoot/${idx}${dir} ] && continue
-        cd ${RECYCLE_DIR}/snapshoot/$idx
-        # 删除后缀
-        sh -c "find \".${dir}\" $str | xargs $DEL_EXEC -rf"
-    done
-    echo ""
-    FixInfo
-    exit 0
-}
 
-Reset_list=()
-Reset_uuids=()
+    local list=()
+    local uuids=()
+    IFS=$'\n' #修改分隔符为换行符
+    for p in $files; do
+        IFS=$'|'
+        local strs=($p)
+        [[ ${#strs[@]} -ne 3 ]] && continue
+        local uuid=${strs[0]}
+        local time=${strs[1]}
+        local file=${strs[2]}
+        local ret=$(du -sh "$DIR_STORAGE/$uuid" | awk '{print $1}' 2>/dev/null)
+        [[ "$ret" = "" ]] && CheckUuid $uuid && continue
+        printf "%-8s %s %s %s\n" "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') $uuid "$file"
+        list+=("$file")
+        uuids+=("$uuid")
+    done
 
-function _ResetRecycle() {
-    local list=$Reset_list
-    local uuids=$Reset_uuids
     local count=${#list[@]}
+
+    # 执行还原
     [[ $count -eq 0 ]] && LOG_PRINTF "没有需要还原的文件: $file" && return 0
 
     echo -n "开始还原?[Y/N]"
@@ -401,7 +454,7 @@ function _ResetRecycle() {
                 fs=${fs:1}
                 local dst=$p$fs
                 local dst_dir=$(dirname "$dst")
-                [ -e "$dst" ] && continue # 文件已存在
+                [ -e "$dst" ] && LOG_WARN " [$i/$count]文件存在: $dst" && continue # 文件已存在
                 if [ ! -d "$dst_dir" ]; then
                     mkdir -p "$dst_dir" 2>/dev/null
                     [[ $? -ne 0 ]] && LOG_ERROR " 文件夹冲突: $(dirname $dst_dir)" && isOk=false && continue
@@ -412,7 +465,7 @@ function _ResetRecycle() {
             done
             ! $isOk && continue
         else
-            [ -e "$p" ] && continue # 文件已存在
+            [ -e "$p" ] && LOG_WARN " [$i/$count]文件存在: $p" && continue # 文件已存在
             LOG_PRINTF " [$i/$count]正在还原: $p"
             local dst_dir=$(dirname "$p")
             if [ ! -d "$dst_dir" ]; then
@@ -426,61 +479,6 @@ function _ResetRecycle() {
         SQL_DeleteToUuid $uuid
     done
     exit 0
-}
-
-# 还原回收站
-function ResetRecycle() {
-    local file=$1
-    local isOk='N'
-    local pro=2
-    local pro_str=""
-    local OLDIFS="$IFS" #备份旧的IFS变量
-
-    GetPars $2 $3
-
-    [[ "$file" = "" ]] && echo "参数错误" && exit 1
-    [ ${file:0:1} = "/" ] || file=$(realpath "$file")
-    if [ -e "$file" ] && [ ! -d "$file" ]; then
-        echo "文件已存在，无法还原：$file" >&2
-        exit 1
-    fi
-
-    echo -e "正在搜索文件: $file\r"
-    local list=()
-    local uuids=()
-    IFS=$'\n' #修改分隔符为换行符
-    for p in $(SQL_Search_time_files $Pars_Start_Time $Pars_End_Time "$file"); do
-        IFS=$'|'
-        local strs=($p)
-        [[ ${#strs[@]} -ne 3 ]] && continue
-        local uuid=${strs[0]}
-        local time=${strs[1]}
-        local file=${strs[2]}
-        local ret=$(du -sh "$DIR_STORAGE/$uuid" | awk '{print $1}' 2>/dev/null)
-        [[ "$ret" = "" ]] && CheckUuid $uuid && continue
-        printf "%-8s %s %s %s\n" "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') $uuid "$file"
-        list+=("$file")
-        uuids+=("$uuid")
-    done
-
-    # 执行还原
-    Reset_list=$list
-    Reset_uuids=$uuids
-    _ResetRecycle
-    exit 0
-}
-
-# 还原回收站
-function ResetUuidRecycle() {
-    GetParsUUID $@
-    local cmd="SELECT name FROM info WHERE uuid in ("
-    for p in ${Pars_UUIDS[@]}; do
-        cmd+="\'%p\',"
-    done
-    cmd+=");"
-    echo "$cmd"
-    exit 0
-    local res=$(SQL_Exec "$cmd")
 }
 
 function ListRecycle() {
@@ -544,6 +542,7 @@ function ShowView() {
     local uuids=${Pars["uuid"]}
     local dir_view=${RECYCLE_DIR}/view
     local count=0
+    local idx=0
 
     local list=
     if [[ "$uuids" = "" ]]; then
@@ -557,10 +556,13 @@ function ShowView() {
         list=$(SQL_Search_uuids $uuids)
     fi
 
+    count=$(echo $list | grep -v "^$" | wc -l)
+    idx=0
     IFS=$'\n' #修改分隔符为换行符
     for p in $list; do
         IFS=$'|'
         local strs=($p)
+        idx=$((idx + 1))
         [[ ${#strs[@]} -ne 3 ]] && continue
         local uuid=${strs[0]}
         local time=${strs[1]}
@@ -583,7 +585,7 @@ function ShowView() {
                 if [[ "$uuids" = "" ]]; then
                     local n=${#dst}
                     [[ $n -gt 80 ]] && n=80
-                    printf " 正在生成视图: %-80.80s\r" ${dst:0-$n:$n}
+                    printf " [%d/%d]正在生成视图: %-80.80s\r" $idx $count ${dst:0-$n:$n}
                 else
                     echo "$uuid -> $file$fs"
                 fi
@@ -601,7 +603,7 @@ function ShowView() {
             if [[ "$uuids" = "" ]]; then
                 local n=${#dst}
                 [[ $n -gt 80 ]] && n=80
-                printf " 正在生成视图: %-80.80s\r" ${dst:0-$n:$n}
+                printf " [%d/%d]正在生成视图: %-80.80s\r" $idx $count ${dst:0-$n:$n}
             else
                 echo "$uuid -> $file"
             fi
@@ -670,8 +672,6 @@ function CheckFun() {
         echo "实现回收站功能 1.0"
         echo "替代命令              : ln -s rm-recycle.sh /usr/local/bin/rm"
         echo "回收站路径            : ${RECYCLE_DIR}"
-        printf " 正在获取回收站大小...\r"
-        echo "回收站已用大小        : $(du -sh ${RECYCLE_DIR} | awk '{print $1}')"
         echo "移动文件夹到回收站    :"
         echo "	rm xxx xxxx"
         echo "	rm -rf xxx/* xxx/*"
@@ -679,17 +679,43 @@ function CheckFun() {
         echo "公共参数              :"
         echo "  起始时间     -st=2019-1-1  -st=18:00:00 -st=2019-1-1T18:00:00"
         echo "  结束时间     -st=2019-1-1  -st=18:00:00 -st=2019-1-1T18:00:00"
-        echo "  uuid列表     -uuid=xxx,xxx,...,xxx"
+        echo "  uuid列表     -uuid=xxx,xxx,...,xxx (权限最高)"
         echo "  输出数据数量 -n=3"
+        echo "  过滤器       -filter=过滤表达式1;过滤表达式2;...;"
+        echo "  反向过滤     -!filter=过滤表达式1;过滤表达式2;...;"
+        echo "                 %            代替一个或多个字符"
+        echo "                 _            仅代替一个字符"
+        echo "                 [char list]  字符列中任何一个字符"
+        echo "                 [^char list] 不在字符列中的任何一个字符"
         echo "查看回收站文件        : rm -list 文件/夹 [-st] [-et] [-n]"
         echo "查看文件历史          : rm -hist 文件/夹 [-st] [-et] [-n]"
         echo "更新回收站视图        : rm -show [文件/夹] [-uuid] [-st] [-et] [-n]"
+        echo "还原文件              : rm -reset [文件/夹] [-uuid] [-st] [-et]"
+        echo "清理回收站            : rm -clean [文件/夹] [-uuid] [-st] [-et] [-filter]"
+        echo "直接删除              : rm -del [文件(夹)]"
+        printf " 正在获取回收站大小...\r"
+        echo "回收站已用大小        : $(du -sh ${RECYCLE_DIR} | awk '{print $1}')"
     elif [ -v Pars["list"] ]; then
         ListRecycle
     elif [ -v Pars["hist"] ]; then
         HistoryRecycle
     elif [ -v Pars["show"] ]; then
         ShowView
+    elif [ -v Pars["reset"] ]; then
+        ResetRecycle
+    elif [ -v Pars["clean"] ]; then
+        CleanRecycle
+    elif [ -v Pars["del"] ]; then
+        # 删除文件
+        IFS=$'\n' #修改分隔符为换行符
+        strs=(${Pars["-"]})
+        for p in ${strs[@]}; do
+            # 获取绝对路径
+            file=$(realpath "$p" 2>>$RECYCLE_LOG)
+            echo "$p => ${file}" >>$RECYCLE_LOG
+            [ ! -e "$file" ] && LOG_WARN "文件不存在: $file" && continue
+            $DEL_EXEC -rf "$file"
+        done
     else
         # 删除文件
         IFS=$'\n' #修改分隔符为换行符
@@ -697,79 +723,12 @@ function CheckFun() {
         for p in ${strs[@]}; do
             # 获取绝对路径
             file=$(realpath "$p" 2>>$RECYCLE_LOG)
-            echo "$arg => ${file}" >>$RECYCLE_LOG
+            echo "$p => ${file}" >>$RECYCLE_LOG
             [ ! -e "$file" ] && LOG_WARN "文件不存在: $file" && continue
-            DeleteFile $file
+            DeleteFile "$file"
         done
     fi
     exit 0
-
-    case "$fun" in
-    "-clean")
-        CleanRecycle ${@:2}
-        _flag="end"
-        ;;
-    "-help" | "--help")
-        echo "实现回收站功能 1.0"
-        echo "替代命令              : ln -s rm-recycle.sh /usr/local/bin/rm"
-        echo "回收站路径            : ${RECYCLE_DIR}"
-        printf " 正在获取回收站大小...\r"
-        echo "回收站已用大小        : $(du -sh ${RECYCLE_DIR} | awk '{print $1}')"
-        echo "移动文件夹到回收站    :"
-        echo "	rm xxx xxxx"
-        echo "	rm -rf xxx/* xxx/*"
-        echo "	rm -rf ../xxx ../xxx"
-        echo "清空回收站            : rm -clean [文件(夹)] [起始存储点/起始时间 2019-1-1T00:00:00] [结束存储点/结束时间 2019-1-2T23:59:59]"
-        echo "清理回收站            : rm -clear 文件(夹) 文件表达式1;文件表达式2.. (<> 表示通配符)"
-        echo "  清理 后缀 .tmp 文件 rm -clear / \"<>.tmp\""
-        echo "  清理 1.txt 文件     rm -clear / \"1.txt\""
-        echo "  多个清理项目        rm -clear / \"<>.tmp;1.txt;2.txt\""
-        echo "还原文件              : rm -reset 文件(夹) [起始存储点/起始时间 2019-1-1T00:00:00] [结束存储点/结束时间 2019-1-2T23:59:59]"
-        echo "还原文件              : rm -reset-uuid [uuid1 ... [uuid..]]"
-        echo "查看回收站文件        : rm -list 文件(夹) [起始存储点/起始时间 2019-1-1T00:00:00] [结束存储点/结束时间 2019-1-2T23:59:59]"
-        echo "查看文件历史          : rm -hist 文件(夹) [起始时间 2019-1-1T00:00:00] [结束时间 2019-1-2T23:59:59]"
-        echo "更新回收站视图        : rm -show [文件(夹)] [起始存储点/起始时间 2019-1-1T00:00:00] [结束存储点/结束时间 2019-1-2T23:59:59]"
-        echo "删除回收站视图        : rm -delshow"
-        echo "直接删除              : rm -del [文件(夹)]"
-        _flag="end"
-        ;;
-    "-reset")
-        ResetRecycle ${@:2}
-        _flag="end"
-        ;;
-    "-reset-uuid")
-        ResetUuidRecycle ${@:2}
-        _flag="end"
-        ;;
-    "-list")
-        ListRecycle ${@:2}
-        _flag="end"
-        ;;
-    "-hist")
-        HistoryRecycle ${@:2}
-        ;;
-    "-show")
-        ShowView ${@:2}
-        _flag="end"
-        ;;
-    "-delshow")
-        Lock $_LOCK_VIEW
-        [ -e "${RECYCLE_DIR}/view/$file" ] && $DEL_EXEC -rf "${RECYCLE_DIR}/view/$file"
-        UnLock $_LOCK_VIEW
-        _flag="end"
-        ;;
-    "-del")
-        is_del_dir=true
-        _flag="del"
-        ;;
-    "-clear")
-        ClearRecycle ${@:2}
-        _flag="end"
-        ;;
-    *)
-        return 0
-        ;;
-    esac
 }
 
 if [ ! -x $DEL_EXEC ]; then
@@ -778,9 +737,6 @@ if [ ! -x $DEL_EXEC ]; then
 fi
 
 [[ "$(type sqlite3)" = "" ]] && echo "请安装sqlite3" >&2 && exit 1
-
-# 创建数据库
-SQL_CreateDB
 
 echo "-------------------------------- $(date) --------------------------------" >>$RECYCLE_LOG
 echo "dir: $(pwd)" >>$RECYCLE_LOG
@@ -791,6 +747,9 @@ for arg in "$@"; do
     [[ $arg = "-rf" ]] || [[ $arg = "-fr" ]] && is_Print=false && is_del_dir=true
 done
 echo "" >>$RECYCLE_LOG
+
+# 创建数据库
+SQL_CreateDB
 
 # 检查回收站路径
 [ "${RECYCLE_DIR}" = "" ] && echo "回收站路径不能为空" >&2 && exit 1
@@ -804,36 +763,6 @@ if [ ! -d ${RECYCLE_DIR} ]; then
     [[ $? -ne 0 ]] && exit $?
 fi
 
-[[ "$idx_max" = "" ]] && idx_max=0
-[[ "$idx_min" = "" ]] && idx_min=0
-
 CheckFun "$@"
-
-# # 预处理参数
-# idx=0
-# for arg in "$@"; do
-#     idx=$((idx + 1))
-#     [[ ${arg:0:1} != "-" ]] && continue
-#     _flag=$arg
-#     CheckFun ${@:$((idx))}
-#     [[ "$_flag" = "end" ]] && exit 0
-# done
-
-# exit 0
-
-# # 执行
-# for arg in "$@"; do
-#     if [[ ${arg:0:1} = "-" ]]; then
-#         continue
-#     elif [[ "$_flag" = "del" ]]; then
-#         $DEL_EXEC -rf "$arg" # 直接删除
-#     else
-#         # 获取绝对路径
-#         file=$(realpath "$arg" 2>>$RECYCLE_LOG)
-#         echo "$arg => ${file}" >>$RECYCLE_LOG
-#         [ ! -e "$file" ] && LOG_WARN "文件不存在: $file" && continue
-#         DeleteFile $file
-#     fi
-# done
 exit 0
 # ------------------------------------------ END ------------------------------------------
