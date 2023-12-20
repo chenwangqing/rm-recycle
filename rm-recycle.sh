@@ -132,8 +132,9 @@ function SQL_Exec() {
     echo "[SQL] $1" >>$RECYCLE_LOG
     Lock $_LOCK_SQL
     sqlite3 ${RECYCLE_DIR}/infos.db "$1"
+    local ret=$?
     UnLock $_LOCK_SQL
-    return $?
+    return $ret
 }
 
 # 创建数据库
@@ -141,19 +142,11 @@ function SQL_CreateDB() {
     local cmd="CREATE TABLE IF NOT EXISTS info (
             [id] INTEGER PRIMARY KEY AUTOINCREMENT,
             [uuid] CHAR(32) NOT NULL,
+            [type] CHAR(1)  NOT NULL,
             [time] INTEGER,
             [name] TEXT NOT NULL
         );"
     SQL_Exec "$cmd"
-    return $?
-}
-
-# 添加数据点 【uuid】【时间戳】【文件名称】
-function SQL_AddNode() {
-    local uuid=$1
-    local ts=$2
-    local name=$3
-    SQL_Exec "INSERT INTO info (uuid, time, name) VALUES ( \"$uuid\",$ts,\"$name\" );"
     return $?
 }
 
@@ -190,6 +183,7 @@ function SQL_Search_time_files() {
         done
         str+="and not ($s) "
     fi
+    [ -v Pars['od'] ] && str+="and type='d' " # 只显示文件夹
     if [[ "$isAbroad" = "" ]]; then
         local cmd="SELECT uuid,time,name FROM info WHERE id in (SELECT max(id) as id FROM info WHERE 
             (name like \"$name%\" or name = \"$file\")
@@ -254,8 +248,7 @@ function SQL_DeleteToUuids() {
 }
 
 # 获取记录数量
-function SQL_GetCount()
-{
+function SQL_GetCount() {
     SQL_Exec "SELECT count(*) FROM info;"
     return $?
 }
@@ -287,30 +280,70 @@ function CheckFile() {
 DIR_STORAGE=${RECYCLE_DIR}/storage
 
 # 删除文件
-function DeleteFile() {
-    local file=$1
-    [ -d $file ] && ! $is_del_dir && LOG_WARN "文件夹无法删除: $file" && return
-    # 检查文件是否保护
-    local ret=$(CheckFile $file)
-    [[ "$ret" != "Ok" ]] && LOG_ERROR "$file: 文件保护" && return
-    local f_dir=$(dirname $file)
-    if [[ "$f_dir" =~ ^$_RECYCLE_DIR.* ]]; then
-        $DEL_EXEC -rf $file # 删除回收站文件
-    else
-        local storage=${RECYCLE_DIR}/storage
-        local uuid=$(cat /proc/sys/kernel/random/uuid)
-        uuid=${uuid//-/}
-        # 获取当前时间戳
-        local time=$(date +%s)
-        [[ "$time" = "" ]] && echo "获取时间失败: $file" && return 1
-        # 写入信息
-        SQL_AddNode "$uuid" $time "$file"
-        [[ $? -ne 0 ]] && echo "写入信息失败: $file" && return 1
+function DeleteFiles() {
+    IFS=$'\n' #修改分隔符为换行符
+    strs=(${Pars["-"]})
+    local uuids=()
+    local files=()
+    local cmd=""
+    # 获取当前时间戳
+    local time=$(date +%s)
+    Pars["-"]=""
+    [[ "$time" = "" ]] && echo "获取时间失败: $file" && return 1
+    # 生成列表
+    for p in ${strs[@]}; do
+        # 获取绝对路径
+        file=$(realpath "$p" 2>>$RECYCLE_LOG)
+        echo "$p => ${file}" >>$RECYCLE_LOG
+        [ ! -e "$file" ] && LOG_WARN "文件不存在: $file" && continue
+        # 检查文件夹是否可以删除
+        local type='f'
+        [ -d $file ] && type='d' && ! $is_del_dir && LOG_WARN "文件夹无法删除: $file" && continue
+        # 检查文件是否保护
+        local ret=$(CheckFile $file)
+        [[ "$ret" != "Ok" ]] && LOG_ERROR "$file: 文件保护" && continue
+        local f_dir=$(dirname $file)
+        if [[ "$f_dir" =~ ^$_RECYCLE_DIR.* ]]; then
+            $DEL_EXEC -rf $file # 删除回收站文件
+        else
+            # 可以删除
+            # 获取uuid
+            local uuid=$(cat /proc/sys/kernel/random/uuid)
+            uuid=${uuid//-/}
+            uuids+=("$uuid")
+            files+=("$file")
+            # 生成插入命令
+            [[ $cmd != "" ]] && cmd+=","
+            cmd+="('$uuid','$type',$time,'$file')"
+        fi
+    done
+    [[ $cmd = "" ]] && exit 0
+    cmd="INSERT INTO info (uuid, type, time, name) VALUES $cmd;"
+    # 批量插入
+    ! SQL_Exec "$cmd" && LOG_ERROR "sqlite3 执行失败！" && exit 1
+    cmd=""
+    # 执行删除
+    local count=${#uuids[@]}
+    local i=0
+    local del_uuids=""
+    while [[ $i -lt $count ]]; do
+        local uuid=${uuids[$i]}
+        local file=${files[$i]}
+        i=$((i + 1))
+        if [ ! -e "$file" ]; then
+            # 记录需要删除的uuid
+            [[ "$del_uuids" != "" ]] && del_uuids+=","
+            del_uuids+="'$uuid'"
+            LOG_WARN "文件不存在: $file"
+            continue
+        fi
         # 移动到存储区
-        mv -f "$file" "$storage/$uuid"
-        [[ $? -ne 0 ]] && echo "移动文件失败: $file" && return 1
-    fi
-    return
+        echo "mv $file -> $DIR_STORAGE/$uuid" >>$RECYCLE_LOG
+        mv -f "$file" "$DIR_STORAGE/$uuid"
+        [[ $? -ne 0 ]] && echo "移动文件失败: $file" && exit 1
+    done
+    SQL_DeleteToUuids "$del_uuids"
+    exit 0
 }
 
 # 清空文件夹
@@ -351,7 +384,7 @@ function CleanRecycle() {
         local uuid=${strs[0]}
         local time=${strs[1]}
         local file=${strs[2]}
-        local ret=$(du -sh "$DIR_STORAGE/$uuid" | awk '{print $1}' 2>/dev/null)
+        local ret=$(du -sh "$DIR_STORAGE/$uuid" 2>/dev/null | awk '{print $1}')
         [[ "$ret" = "" ]] && continue
         printf "%-8s %s %s %s\n" "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') $uuid "$file"
         idx=$((idx + 1))
@@ -427,7 +460,7 @@ function ResetRecycle() {
         local uuid=${strs[0]}
         local time=${strs[1]}
         local file=${strs[2]}
-        local ret=$(du -sh "$DIR_STORAGE/$uuid" | awk '{print $1}' 2>/dev/null)
+        local ret=$(du -sh "$DIR_STORAGE/$uuid" 2>/dev/null | awk '{print $1}')
         [[ "$ret" = "" ]] && CheckUuid $uuid && continue
         printf "%-8s %s %s %s\n" "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') $uuid "$file"
         list+=("$file")
@@ -506,7 +539,7 @@ function ListRecycle() {
         local uuid=${strs[0]}
         local time=${strs[1]}
         local file=${strs[2]}
-        local ret=$(du -sh "$DIR_STORAGE/$uuid" | awk '{print $1}' 2>/dev/null)
+        local ret=$(du -sh "$DIR_STORAGE/$uuid" 2>/dev/null | awk '{print $1}')
         [[ "$ret" = "" ]] && CheckUuid $uuid && continue
         printf "%-8s %s %s %s\n" "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') "$uuid" "$file"
     done
@@ -533,7 +566,7 @@ function HistoryRecycle() {
         local uuid=${strs[0]}
         local time=${strs[1]}
         local file=${strs[2]}
-        local ret=$(du -sh "$DIR_STORAGE/$uuid" | awk '{print $1}' 2>/dev/null)
+        local ret=$(du -sh "$DIR_STORAGE/$uuid" 2>/dev/null | awk '{print $1}')
         [[ "$ret" = "" ]] && CheckUuid $uuid && continue
         printf "%-4d %-8s %s  %s\n" $idx "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') $uuid
         idx=$((idx + 1))
@@ -688,6 +721,7 @@ function CheckFun() {
         echo "	rm -rf xxx/* xxx/*"
         echo "  rm -rf ../xxx ../xxx"
         echo "公共参数              :"
+        echo "  只显示文件夹 -od"
         echo "  起始时间     -st=2019-1-1  -st=18:00:00 -st=2019-1-1T18:00:00"
         echo "  结束时间     -st=2019-1-1  -st=18:00:00 -st=2019-1-1T18:00:00"
         echo "  uuid列表     -uuid=xxx,xxx,...,xxx (权限最高)"
@@ -698,7 +732,7 @@ function CheckFun() {
         echo "                 _            仅代替一个字符"
         echo "                 [char list]  字符列中任何一个字符"
         echo "                 [^char list] 不在字符列中的任何一个字符"
-        echo "查看回收站文件        : rm -list 文件/夹 [-st] [-et] [-n]"
+        echo "查看回收站文件        : rm -list 文件/夹 [-st] [-et] [-n] [-od]"
         echo "查看文件历史          : rm -hist 文件/夹 [-st] [-et] [-n]"
         echo "更新回收站视图        : rm -show [文件/夹] [-uuid] [-st] [-et] [-n]"
         echo "还原文件              : rm -reset [文件/夹] [-uuid] [-st] [-et]"
@@ -729,15 +763,7 @@ function CheckFun() {
         done
     else
         # 删除文件
-        IFS=$'\n' #修改分隔符为换行符
-        strs=(${Pars["-"]})
-        for p in ${strs[@]}; do
-            # 获取绝对路径
-            file=$(realpath "$p" 2>>$RECYCLE_LOG)
-            echo "$p => ${file}" >>$RECYCLE_LOG
-            [ ! -e "$file" ] && LOG_WARN "文件不存在: $file" && continue
-            DeleteFile "$file"
-        done
+        DeleteFiles
     fi
     exit 0
 }
