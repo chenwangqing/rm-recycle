@@ -43,6 +43,8 @@ _flag=' ' # 功能标志
 _RECYCLE_DIR=$(realpath $RECYCLE_DIR)
 is_del_dir=false #是否删除文件夹
 is_Print=true    # 显示
+DIR_STORAGE=${RECYCLE_DIR}/storage
+IGNORE=${RECYCLE_DIR}/ignore
 
 declare -A Pars # <k> "v1 \n v2 \n .."
 
@@ -257,8 +259,7 @@ function SQL_DeleteToUuids() {
     return $?
 }
 
-function SQL_PrintInfo()
-{
+function SQL_PrintInfo() {
     local str=$(SQL_Exec "select min(time),max(time),count(*) from info;")
     IFS=$'|' #修改分隔符
     local strs=($str)
@@ -290,10 +291,18 @@ function CheckFile() {
     echo "Ok"
 }
 
-DIR_STORAGE=${RECYCLE_DIR}/storage
-
 # 删除文件
 function DeleteFiles() {
+    # 加载忽略
+    local ig_str=""
+    IFS=$'\n' #修改分隔符为换行符
+    for p in $(cat $IGNORE); do
+        p=${p//\%/\*} # % -> *
+        p=${p//\_/\?} # _ -> ?
+        [ ! -z $ig_str ] && ig_str+=" -or "
+        ig_str+="-wholename '$p'"
+    done
+    # 执行删除
     IFS=$'\n' #修改分隔符为换行符
     strs=(${Pars["-"]})
     local uuids=()
@@ -319,7 +328,10 @@ function DeleteFiles() {
         if [[ "$f_dir" =~ ^$_RECYCLE_DIR.* ]]; then
             $DEL_EXEC -rf $file # 删除回收站文件
         else
-            # 可以删除
+            # 忽略检查
+            [ ! -z $ig_str ] && sh -c "find '$file' $ig_str  | xargs -i $DEL_EXEC -rf {}"
+            # 可以删除?
+            [ ! -e $file ] && continue
             # 获取uuid
             local uuid=$(cat /proc/sys/kernel/random/uuid)
             uuid=${uuid//-/}
@@ -365,12 +377,14 @@ function CleanRecycle() {
     local st=$((10#${Pars["st"]}))
     local et=$((10#${Pars["et"]}))
     local uuids=${Pars["uuid"]}
+    local filter=${Pars["F"]}
+    local nfilter=${Pars["RF"]}
     local isOk=false
     local files=""
     local idx=0
 
-    if [[ "$uuids" = "" ]]; then
-        if [[ $st -ge 0 ]] && [[ $et -ge $(date +%s) ]] && [[ "$file" = "" ]]; then
+    if [[ -z $uuids ]]; then
+        if [[ $st -ge 0 ]] && [[ $et -ge $(date +%s) ]] && [[ "$file" = "" ]] && [ -z $filter ] && [ -z $nfilter ]; then
             echo -n "将清空整个回收站[Y/N]:"
             read isOk
             [[ "$isOk" != "y" ]] && [[ "$isOk" != "Y" ]] && echo "取消操作" && exit 0
@@ -821,8 +835,8 @@ function CheckFun() {
         echo "替代命令              : ln -s rm-recycle.sh /usr/local/bin/rm"
         echo "回收站路径            : ${RECYCLE_DIR}"
         echo "移动文件夹到回收站    :"
-        echo "	rm xxx xxxx"
-        echo "	rm -rf xxx/* xxx/*"
+        echo "  rm xxx xxxx"
+        echo "  rm -rf xxx/* xxx/*"
         echo "  rm -rf ../xxx ../xxx"
         echo "公共参数              :"
         echo "  只显示文件夹 -od"
@@ -843,6 +857,9 @@ function CheckFun() {
         echo "还原文件              : rm -reset [文件/夹] [-uuid] [-st] [-et]"
         echo "清理回收站            : rm -clean [文件/夹] [-uuid] [-st] [-et] [-F] [-RF]"
         echo "直接删除              : rm -del [文件(夹)]"
+        echo "添加忽略              : rm -ig-add '过滤表达式1' '过滤表达式2'"
+        echo "删除忽略              : rm -ig-del '过滤表达式1' '过滤表达式2'"
+        echo "查看忽略              : rm -ig-list"
         printf " 正在获取回收站大小...\r"
         echo "回收站已用大小        : $(du -sh ${RECYCLE_DIR} | awk '{print $1}') [$(SQL_PrintInfo)]"
     elif [ -v Pars["list"] ]; then
@@ -866,6 +883,22 @@ function CheckFun() {
             [ ! -e "$file" ] && LOG_WARN "文件不存在: $file" && continue
             $DEL_EXEC -rf "$file"
         done
+    elif [ -v Pars["ig-add"] ]; then
+        Lock $_LOCK_SQL
+        echo ${Pars["-"]} >>$IGNORE
+        sort $IGNORE | uniq >${IGNORE}.bak
+        mv -f ${IGNORE}.bak $IGNORE
+        UnLock $_LOCK_SQL
+    elif [ -v Pars["ig-del"] ]; then
+        IFS=$'\n' #修改分隔符为换行符
+        strs=${Pars["-"]}
+        Lock $_LOCK_SQL
+        for p in $strs; do
+            sed -i "/$p/d" $IGNORE
+        done
+        UnLock $_LOCK_SQL
+    elif [ -v Pars["ig-list"] ]; then
+        cat $IGNORE
     else
         # 删除文件
         DeleteFiles
