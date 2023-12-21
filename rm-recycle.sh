@@ -168,8 +168,8 @@ function SQL_Search_time_files() {
     local isAbroad=$4 # 广泛
     local limit=$((10#${Pars["n"]}))
     IFS=$';' #修改分隔符
-    local filter=(${Pars["filter"]})
-    local nfilter=(${Pars["!filter"]})
+    local filter=(${Pars["F"]})
+    local nfilter=(${Pars["RF"]})
     [[ $limit -ne 0 ]] && limit="LIMIT $limit" || limit=""
     local file=$name
     if [[ "${name:0-1:1}" = "/" ]]; then
@@ -235,7 +235,7 @@ function SQL_Search_time_file_history() {
     local limit=$((10#${Pars["n"]}))
     [[ $limit -ne 0 ]] && limit="LIMIT $limit" || limit=""
     local cmd="SELECT uuid,time,name FROM info 
-            WHERE name = \"$name\" 
+            WHERE name like \"$name\" 
             and time >= $ts 
             and time <= $te 
             ORDER BY id DESC $limit;"
@@ -257,10 +257,13 @@ function SQL_DeleteToUuids() {
     return $?
 }
 
-# 获取记录数量
-function SQL_GetCount() {
-    SQL_Exec "SELECT count(*) FROM info;"
-    return $?
+function SQL_PrintInfo()
+{
+    local str=$(SQL_Exec "select min(time),max(time),count(*) from info;")
+    IFS=$'|' #修改分隔符
+    local strs=($str)
+    echo "$(date -d @${strs[0]} '+%Y-%m-%dT%H:%M:%S') - $(date -d @${strs[1]} '+%Y-%m-%dT%H:%M:%S') ${strs[2]}"
+    return 0
 }
 
 # 检查uuid
@@ -581,15 +584,22 @@ function ListRecycle() {
     local file=${Pars["-"]}
     local st=$((10#${Pars["st"]}))
     local et=$((10#${Pars["et"]}))
+    local isOnlySize=false
     local size=0
+    local idx=0
+
+    [ -v Pars['os'] ] && isOnlySize=true
 
     [[ "$file" = "" ]] && echo "参数错误" && exit 1
     [[ ${file:0:1} = "/" ]] || file=$(realpath "$file")
 
+    local files=$(SQL_Search_time_files $st $et "$file")
+    local count=$(echo $files | grep -v "^$" | wc -l)
+
     echo "[$st - $et] $file:"
     IFS=$'\n'
-    printf "大小         删除时间                    UUID                 文件名称\n"
-    for p in $(SQL_Search_time_files $st $et "$file"); do
+    ! $isOnlySize && printf "大小         删除时间                    UUID                 文件名称\n"
+    for p in $files; do
         IFS=$'|'
         local strs=($p)
         [[ ${#strs[@]} -ne 3 ]] && continue
@@ -598,9 +608,15 @@ function ListRecycle() {
         local file=${strs[2]}
         local ret=$(du -sh "$DIR_STORAGE/$uuid" 2>/dev/null | awk '{print $1}')
         [[ "$ret" = "" ]] && CheckUuid $uuid && continue
-        printf "%-8s %s %s %s\n" "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') "$uuid" "$file"
         size=$(expr $(StrToNumber $ret) + $size)
+        if ! $isOnlySize; then
+            printf "%-8s %s %s %s\n" "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') "$uuid" "$file"
+        else
+            idx=$((idx + 1))
+            printf " [%d/%d] %-8d %s    \r" $idx $count $size "$file"
+        fi
     done
+    $isOnlySize && echo ""
     echo "总大小：$(NumberToStr $size)"
     exit 0
 }
@@ -611,15 +627,29 @@ function HistoryRecycle() {
     local file=${Pars["-"]}
     local st=$((10#${Pars["st"]}))
     local et=$((10#${Pars["et"]}))
+    local isOnlySize=false
     local idx=0
     local size=0
+
+    [ -v Pars['os'] ] && isOnlySize=true
 
     [[ "$file" = "" ]] && echo "参数错误" && exit 1
     [[ ${file:0:1} = "/" ]] || file=$(realpath "$file")
 
+    local files=$(SQL_Search_time_file_history $st $et "$file")
+    local count=0
+    if $isOnlySize; then
+        for p in $files; do
+            count=$((count + 1))
+        done
+    fi
+    local isGlobbing=false
+    [[ $file =~ % ]] && isGlobbing=true
+
     echo "[$st - $et] $file:"
-    printf " 序号 大小         删除时间        UUID\n"
-    for p in $(SQL_Search_time_file_history $st $et "$file"); do
+    ! $isOnlySize && printf " 序号 大小         删除时间        UUID\n"
+    IFS=$'\n'
+    for p in $files; do
         IFS=$'|'
         local strs=($p)
         [[ ${#strs[@]} -ne 3 ]] && continue
@@ -628,10 +658,20 @@ function HistoryRecycle() {
         local file=${strs[2]}
         local ret=$(du -sh "$DIR_STORAGE/$uuid" 2>/dev/null | awk '{print $1}')
         [[ "$ret" = "" ]] && CheckUuid $uuid && continue
-        printf "%-4d %-8s %s  %s\n" $idx "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') $uuid
         size=$(expr $(StrToNumber $ret) + $size)
-        idx=$((idx + 1))
+        if $isOnlySize; then
+            idx=$((idx + 1))
+            printf " [%d/%d] %-8d %s    \r" $idx $count $size "$file"
+        else
+            if $isGlobbing; then
+                printf "%-4d %-8s %s %s %s\n" $idx "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') $uuid $file
+            else
+                printf "%-4d %-8s %s %s\n" $idx "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') $uuid
+            fi
+            idx=$((idx + 1))
+        fi
     done
+    $isOnlySize && echo ""
     echo "总大小：$(NumberToStr $size)"
     exit 0
 }
@@ -786,24 +826,25 @@ function CheckFun() {
         echo "  rm -rf ../xxx ../xxx"
         echo "公共参数              :"
         echo "  只显示文件夹 -od"
+        echo "  只显示大小   -os"
         echo "  起始时间     -st=2019-1-1  -st=18:00:00 -st=2019-1-1T18:00:00"
         echo "  结束时间     -st=2019-1-1  -st=18:00:00 -st=2019-1-1T18:00:00"
         echo "  uuid列表     -uuid=xxx,xxx,...,xxx (权限最高)"
         echo "  输出数据数量 -n=3"
-        echo "  过滤器       -filter=过滤表达式1;过滤表达式2;...;"
-        echo "  反向过滤     -!filter=过滤表达式1;过滤表达式2;...;"
+        echo "  过滤器       -F=过滤表达式1;过滤表达式2;...;"
+        echo "  反向过滤     -RF=过滤表达式1;过滤表达式2;...;"
         echo "                 %            代替一个或多个字符"
         echo "                 _            仅代替一个字符"
         echo "                 [char list]  字符列中任何一个字符"
         echo "                 [^char list] 不在字符列中的任何一个字符"
-        echo "查看回收站文件        : rm -list 文件/夹 [-st] [-et] [-n] [-od]"
-        echo "查看文件历史          : rm -hist 文件/夹 [-st] [-et] [-n]"
-        echo "更新回收站视图        : rm -show [文件/夹] [-uuid] [-st] [-et] [-n]"
+        echo "查看回收站文件        : rm -list 文件/夹 [-st] [-et] [-n] [-od] [-os] [-F] [-RF]"
+        echo "查看文件历史          : rm -hist 文件/夹 [-st] [-et] [-n] [-os]"
+        echo "更新回收站视图        : rm -show [文件/夹[%]] [-uuid] [-st] [-et] [-n]"
         echo "还原文件              : rm -reset [文件/夹] [-uuid] [-st] [-et]"
-        echo "清理回收站            : rm -clean [文件/夹] [-uuid] [-st] [-et] [-filter]"
+        echo "清理回收站            : rm -clean [文件/夹] [-uuid] [-st] [-et] [-F] [-RF]"
         echo "直接删除              : rm -del [文件(夹)]"
         printf " 正在获取回收站大小...\r"
-        echo "回收站已用大小        : $(du -sh ${RECYCLE_DIR} | awk '{print $1}') [$(SQL_GetCount)]"
+        echo "回收站已用大小        : $(du -sh ${RECYCLE_DIR} | awk '{print $1}') [$(SQL_PrintInfo)]"
     elif [ -v Pars["list"] ]; then
         ListRecycle
     elif [ -v Pars["hist"] ]; then
