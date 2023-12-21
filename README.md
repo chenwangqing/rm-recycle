@@ -99,5 +99,5 @@ rm -reset /xxx -st=2023-1-1T12:00:00 -et=2023-1-1T13:00:00
 ### 5.清理回收站的一些临时文件
 
 ```sh
-rm -clean /xxx -filter="%.o;%.i;%.tmp;%.a;%.s"
+rm -clean /xxx -F="%.o;%.i;%.tmp;%.a;%.s"
 ```
