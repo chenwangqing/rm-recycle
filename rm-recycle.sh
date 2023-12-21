@@ -133,7 +133,7 @@ function UnLock() {
 function SQL_Exec() {
     local str=$1
     local sql_file=/dev/shm/.recycle.$$.sql
-    [[ $str == "" ]] && return 1
+    [ -z $str ] && return 1
     # echo "[SQL] $str" >>$RECYCLE_LOG
     # 参数太多就只能写到文件在执行
     [[ ${#str} -gt 65536 ]] && echo "$str" >$sql_file && str=""
