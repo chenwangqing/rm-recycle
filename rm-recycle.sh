@@ -133,12 +133,12 @@ function UnLock() {
 function SQL_Exec() {
     local str=$1
     local sql_file=/dev/shm/.recycle.$$.sql
-    [ -z $str ] && return 1
+    [[ -z $str ]] && return 1
     # echo "[SQL] $str" >>$RECYCLE_LOG
     # 参数太多就只能写到文件在执行
     [[ ${#str} -gt 65536 ]] && echo "$str" >$sql_file && str=""
     Lock $_LOCK_SQL
-    if [[ "$str" != "" ]]; then
+    if [[ ! -z $str ]]; then
         sqlite3 ${RECYCLE_DIR}/infos.db "$str"
     else
         sqlite3 ${RECYCLE_DIR}/infos.db <$sql_file
@@ -182,7 +182,7 @@ function SQL_Search_time_files() {
     local str=""
     if [[ ${#filter[@]} -ne 0 ]]; then
         for p in ${filter[@]}; do
-            [[ $str != "" ]] && str+=" or "
+            [[ ! -z $str ]] && str+=" or "
             str+="name like '$p'"
         done
         str="and ($str) "
@@ -190,13 +190,13 @@ function SQL_Search_time_files() {
     if [[ ${#nfilter[@]} -ne 0 ]]; then
         local s=""
         for p in ${nfilter[@]}; do
-            [[ $s != "" ]] && s+=" or "
+            [[ ! -z $s ]] && s+=" or "
             s+="name like '$p'"
         done
         str+="and not ($s) "
     fi
     [ -v Pars['od'] ] && str+="and type='d' " # 只显示文件夹
-    if [[ "$isAbroad" = "" ]]; then
+    if [[ -z $isAbroad ]]; then
         local cmd="SELECT uuid,time,name FROM info WHERE id in (SELECT max(id) as id FROM info WHERE 
             (name like \"$name%\" or name = \"$file\")
             and time >= $ts 
@@ -311,7 +311,7 @@ function DeleteFiles() {
     # 获取当前时间戳
     local time=$(date +%s)
     Pars["-"]=""
-    [[ "$time" = "" ]] && echo "获取时间失败: $file" && return 1
+    [[ -z $time ]] && echo "获取时间失败: $file" && return 1
     # 生成列表
     for p in ${strs[@]}; do
         # 获取绝对路径
@@ -338,11 +338,11 @@ function DeleteFiles() {
             uuids+=("$uuid")
             files+=("$file")
             # 生成插入命令
-            [[ $cmd != "" ]] && cmd+=","
+            [[ ! -z $cmd ]] && cmd+=","
             cmd+="('$uuid','$type',$time,'$file')"
         fi
     done
-    [[ $cmd = "" ]] && exit 0
+    [[ -z $cmd ]] && exit 0
     cmd="INSERT INTO info (uuid, type, time, name) VALUES $cmd;"
     # 批量插入
     ! SQL_Exec "$cmd" && LOG_ERROR "sqlite3 执行失败！" && exit 1
@@ -357,7 +357,7 @@ function DeleteFiles() {
         i=$((i + 1))
         if [ ! -e "$file" ]; then
             # 记录需要删除的uuid
-            [[ "$del_uuids" != "" ]] && del_uuids+=","
+            [[ ! -z $del_uuids ]] && del_uuids+=","
             del_uuids+="'$uuid'"
             LOG_WARN "文件不存在: $file"
             continue
@@ -367,7 +367,7 @@ function DeleteFiles() {
         mv -f "$file" "$DIR_STORAGE/$uuid"
         [[ $? -ne 0 ]] && echo "移动文件失败: $file" && exit 1
     done
-    [[ "$del_uuids" != "" ]] && SQL_DeleteToUuids "$del_uuids"
+    [[ ! -z $del_uuids ]] && SQL_DeleteToUuids "$del_uuids"
     exit 0
 }
 
@@ -384,7 +384,7 @@ function CleanRecycle() {
     local idx=0
 
     if [[ -z $uuids ]]; then
-        if [[ $st -ge 0 ]] && [[ $et -ge $(date +%s) ]] && [[ "$file" = "" ]] && [ -z $filter ] && [ -z $nfilter ]; then
+        if [[ $st -ge 0 ]] && [[ $et -ge $(date +%s) ]] && [[ -z $file ]] && [ -z $filter ] && [ -z $nfilter ]; then
             echo -n "将清空整个回收站[Y/N]:"
             read isOk
             [[ "$isOk" != "y" ]] && [[ "$isOk" != "Y" ]] && echo "取消操作" && exit 0
@@ -392,7 +392,7 @@ function CleanRecycle() {
             $DEL_EXEC -rf "${RECYCLE_DIR}/storage" "${RECYCLE_DIR}/view" "${RECYCLE_DIR}/infos.db"
             exit 0
         fi
-        [[ "$file" = "" ]] && file="/"
+        [[ -z $file ]] && file="/"
         [ ${file:0:1} = "/" ] || file=$(realpath "$file")
         echo "[$st - $et] $file:"
         printf "正在搜索文件 ... \r"
@@ -412,7 +412,7 @@ function CleanRecycle() {
         local time=${strs[1]}
         local file=${strs[2]}
         local ret=$(du -sh "$DIR_STORAGE/$uuid" 2>/dev/null | awk '{print $1}')
-        [[ "$ret" = "" ]] && continue
+        [[ -z $ret ]] && continue
         printf "%-8s %s %s %s\n" "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') $uuid "$file"
         idx=$((idx + 1))
         [[ $idx -gt 10 ]] && echo "..." && break
@@ -440,14 +440,14 @@ function CleanRecycle() {
         [[ $n -gt 80 ]] && n=80
         printf " [$idx/$count]正在删除: ${file:0-$n:$n}\r"
         [ -e "$DIR_STORAGE/$uuid" ] && $DEL_EXEC -rf "$DIR_STORAGE/$uuid"
-        [[ $uuids != "" ]] && uuids+=","
+        [[ ! -z $uuids ]] && uuids+=","
         uuids+="'$uuid'"
         if [[ ${#uuids} -gt 1024 ]]; then
             SQL_DeleteToUuids "$uuids"
             uuids=""
         fi
     done
-    [[ "$uuids" != "" ]] && SQL_DeleteToUuids "$uuids"
+    [[ ! -z $uuids ]] && SQL_DeleteToUuids "$uuids"
     echo ""
     echo "回收站清理完成！"
     exit 0
@@ -462,8 +462,8 @@ function ResetRecycle() {
     local isOk=false
     local files=
 
-    if [[ "$uuids" = "" ]]; then
-        [[ "$file" = "" ]] && echo "参数错误" && exit 1
+    if [[ -z $uuids ]]; then
+        [[ -z $file ]] && echo "参数错误" && exit 1
         [ ${file:0:1} = "/" ] || file=$(realpath "$file")
         if [ -e "$file" ] && [ ! -d "$file" ]; then
             echo "文件已存在，无法还原：$file" >&2
@@ -488,7 +488,7 @@ function ResetRecycle() {
         local time=${strs[1]}
         local file=${strs[2]}
         local ret=$(du -sh "$DIR_STORAGE/$uuid" 2>/dev/null | awk '{print $1}')
-        [[ "$ret" = "" ]] && CheckUuid $uuid && continue
+        [[ -z $ret ]] && CheckUuid $uuid && continue
         printf "%-8s %s %s %s\n" "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') $uuid "$file"
         list+=("$file")
         uuids+=("$uuid")
@@ -604,7 +604,7 @@ function ListRecycle() {
 
     [ -v Pars['os'] ] && isOnlySize=true
 
-    [[ "$file" = "" ]] && echo "参数错误" && exit 1
+    [[ -z $file ]] && echo "参数错误" && exit 1
     [[ ${file:0:1} = "/" ]] || file=$(realpath "$file")
 
     local files=$(SQL_Search_time_files $st $et "$file")
@@ -621,7 +621,7 @@ function ListRecycle() {
         local time=${strs[1]}
         local file=${strs[2]}
         local ret=$(du -sh "$DIR_STORAGE/$uuid" 2>/dev/null | awk '{print $1}')
-        [[ "$ret" = "" ]] && CheckUuid $uuid && continue
+        [[ -z $ret ]] && CheckUuid $uuid && continue
         size=$(expr $(StrToNumber $ret) + $size)
         if ! $isOnlySize; then
             printf "%-8s %s %s %s\n" "$ret" $(date -d @$time '+%Y-%m-%d %H:%M:%S') "$uuid" "$file"
@@ -647,7 +647,7 @@ function HistoryRecycle() {
 
     [ -v Pars['os'] ] && isOnlySize=true
 
-    [[ "$file" = "" ]] && echo "参数错误" && exit 1
+    [[ -z $file ]] && echo "参数错误" && exit 1
     [[ ${file:0:1} = "/" ]] || file=$(realpath "$file")
 
     local files=$(SQL_Search_time_file_history $st $et "$file")
@@ -671,7 +671,7 @@ function HistoryRecycle() {
         local time=${strs[1]}
         local file=${strs[2]}
         local ret=$(du -sh "$DIR_STORAGE/$uuid" 2>/dev/null | awk '{print $1}')
-        [[ "$ret" = "" ]] && CheckUuid $uuid && continue
+        [[ -z $ret ]] && CheckUuid $uuid && continue
         size=$(expr $(StrToNumber $ret) + $size)
         if $isOnlySize; then
             idx=$((idx + 1))
@@ -703,8 +703,8 @@ function ShowView() {
     local _count=0
 
     local list=
-    if [[ "$uuids" = "" ]]; then
-        [[ "$file" = "" ]] && file="/"
+    if [[ -z $uuids ]]; then
+        [[ -z $file ]] && file="/"
         [[ ${file:0:1} = "/" ]] || file=$(realpath "$file")
         echo "[$st - $et] $file:"
         list=$(SQL_Search_time_files $st $et "$file")
@@ -741,7 +741,7 @@ function ShowView() {
                     mkdir -p "$dst_dir" 2>/dev/null
                     [[ $? -ne 0 ]] && LOG_ERROR " 文件夹冲突: $dst_dir" && continue
                 fi
-                if [[ "$uuids" = "" ]]; then
+                if [[ -z $uuids ]]; then
                     local n=${#dst}
                     [[ $n -gt 80 ]] && n=80
                     printf " [%d/%d]正在生成视图: %-80.80s\r" $idx $count ${dst:0-$n:$n}
@@ -760,7 +760,7 @@ function ShowView() {
                 mkdir -p "$dst_dir" 2>/dev/null
                 [[ $? -ne 0 ]] && LOG_ERROR " 文件夹冲突: $dst_dir" && continue
             fi
-            if [[ "$uuids" = "" ]]; then
+            if [[ -z $uuids ]]; then
                 local n=${#dst}
                 [[ $n -gt 80 ]] && n=80
                 printf " [%d/%d]正在生成视图: %-80.80s\r" $idx $count ${dst:0-$n:$n}
@@ -794,14 +794,14 @@ function CheckFun() {
                 Pars["$p"]=""
             fi
         else
-            [[ "${Pars["-"]}" != "" ]] && Pars["-"]+=$'\n'
+            [[ ! -z ${Pars["-"]} ]] && Pars["-"]+=$'\n'
             Pars["-"]+="$p"
         fi
     done
 
     # 参数检查
     str=${Pars["st"]} # 起始时间戳
-    if [[ "$str" = "" ]]; then
+    if [[ -z $str ]]; then
         Pars["st"]="0"
     elif [[ $str =~ [-|:] ]]; then
         Pars["st"]="$(date -d $str +%s)"
@@ -810,7 +810,7 @@ function CheckFun() {
         exit 1
     fi
     str=${Pars["et"]} # 结束时间戳
-    if [[ "$str" = "" ]]; then
+    if [[ -z $str ]]; then
         Pars["et"]="$(date +%s -d '+1 day')"
     elif [[ $str =~ [-|:] ]]; then
         Pars["et"]="$(date -d $str +%s)"
