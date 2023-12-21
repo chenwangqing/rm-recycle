@@ -297,6 +297,7 @@ function DeleteFiles() {
     local ig_str=""
     IFS=$'\n' #修改分隔符为换行符
     for p in $(cat $IGNORE); do
+        [ -z $p ] && continue
         p=${p//\%/\*} # % -> *
         p=${p//\_/\?} # _ -> ?
         [ ! -z $ig_str ] && ig_str+=" -or "
