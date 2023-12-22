@@ -9,10 +9,10 @@
 #############################################################################################
 
 ## ---------------------------------- 参数配置 ---------------------------------- ##
-RECYCLE_DIR=~/.recycle              # 回收站路径
+declare -r RECYCLE_DIR=~/.recycle   # 回收站路径
 RECYCLE_LOG=/dev/shm/rm-recycle.log # 日志
-DEL_EXEC=/usr/bin/rm                # 实际删除程序
-ProtectionList=( # 保护文件夹列表
+declare -r DEL_EXEC=/usr/bin/rm     # 实际删除程序
+declare -r ProtectionList=( # 保护文件夹列表
     /usr/bin
     /usr/lib
     /usr/lib32
@@ -37,14 +37,11 @@ ProtectionList=( # 保护文件夹列表
 ## ----------------------------------   END   ---------------------------------- ##
 
 set -f # 关闭通配符
-idx_max=0
-idx_min=0
-_flag=' ' # 功能标志
-_RECYCLE_DIR=$(realpath $RECYCLE_DIR)
+declare -r _RECYCLE_DIR=$(realpath $RECYCLE_DIR)
+declare -r DIR_STORAGE=${RECYCLE_DIR}/storage
+declare -r IGNORE=${RECYCLE_DIR}/ignore
 is_del_dir=false #是否删除文件夹
 is_Print=true    # 显示
-DIR_STORAGE=${RECYCLE_DIR}/storage
-IGNORE=${RECYCLE_DIR}/ignore
 
 declare -A Pars # <k> "v1 \n v2 \n .."
 
@@ -52,8 +49,8 @@ declare -A Pars # <k> "v1 \n v2 \n .."
 #                               | 日志操作 |
 # --------------------------------------------------------------------------------
 
-_LOG_COLORS=('' '\033[33m' '\033[31m')
-_LOG_NC='\033[0m'
+declare -r _LOG_COLORS=('' '\033[33m' '\033[31m')
+declare -r _LOG_NC='\033[0m'
 
 [[ "$RM_LOG" != "ON" ]] && RECYCLE_LOG="/dev/null"
 
@@ -87,10 +84,10 @@ function LOG_ERROR() {
 #                                   | 锁 |
 # --------------------------------------------------------------------------------
 
-_LOCK_SQL=200  # 索引保护
-_LOCK_VIEW=201 # 视图
+declare -r _LOCK_SQL=200  # 索引保护
+declare -r _LOCK_VIEW=201 # 视图
 
-_lockfiles=("/dev/shm/.recycle.data.lock" "/dev/shm/.recycle.view.lock")
+declare -r _lockfiles=("/dev/shm/.recycle.data.lock" "/dev/shm/.recycle.view.lock")
 exec 200<>${_lockfiles[0]}
 exec 201<>${_lockfiles[1]}
 
@@ -827,10 +824,6 @@ function CheckFun() {
 
     [ ! -v Pars["n"] ] && Pars["n"]="0"
 
-    [ -v Pars["r"] ] && is_del_dir=true
-    [ -v Pars["f"] ] && is_Print=false
-    [ -v Pars["rf"] ] || [ -v Pars["fr"] ] && is_del_dir=true && is_Print=false
-
     if [ -v Pars["help"] ]; then
         echo "实现回收站功能 2.0"
         echo "替代命令              : ln -s rm-recycle.sh /usr/local/bin/rm"
@@ -920,7 +913,7 @@ for arg in "$@"; do
     echo -n "$arg " >>$RECYCLE_LOG
     [[ $arg = "-f" ]] && is_Print=false
     [[ $arg = "-r" ]] && is_del_dir=true
-    [[ $arg = "-rf" ]] || [[ $arg = "-fr" ]] && is_Print=false && is_del_dir=true
+    [[ $arg = "-rf" || $arg = "-fr" ]] && is_Print=false && is_del_dir=true
 done
 echo "" >>$RECYCLE_LOG
 
@@ -928,7 +921,7 @@ echo "" >>$RECYCLE_LOG
 SQL_CreateDB
 
 # 检查回收站路径
-[ "${RECYCLE_DIR}" = "" ] && echo "回收站路径不能为空" >&2 && exit 1
+[ -z $RECYCLE_DIR ] && echo "回收站路径不能为空" >&2 && exit 1
 
 # 检查存储路径
 [ ! -d "$DIR_STORAGE" ] && mkdir -p "$DIR_STORAGE"
