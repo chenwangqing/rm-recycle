@@ -385,10 +385,10 @@ function CleanRecycle() {
     local idx=0
 
     if [[ -z $uuids ]]; then
-        if [[ $st -ge 0 ]] && [[ $et -ge $(date +%s) ]] && [[ -z $file ]] && [ -z $filter ] && [ -z $nfilter ]; then
+        if [[ $st -ge 0 && $et -ge $(date +%s) && -z $file && -z $filter && -z $nfilter ]]; then
             read -n1 -p "将清空整个回收站[Y/N]:" isOk
             echo ""
-            [[ "$isOk" != "y" ]] && [[ "$isOk" != "Y" ]] && echo "取消操作" && exit 0
+            [[ "$isOk" != "y" && "$isOk" != "Y" ]] && echo "取消操作" && exit 0
             # 删除所有
             $DEL_EXEC -rf "${RECYCLE_DIR}/storage" "${RECYCLE_DIR}/view" "${RECYCLE_DIR}/infos.db"
             exit 0
@@ -424,7 +424,7 @@ function CleanRecycle() {
 
     read -n1 -p "清理回收站[Y/N]:" isOk
     echo ""
-    [[ "$isOk" != "y" ]] && [[ "$isOk" != "Y" ]] && echo "取消操作" && exit 0
+    [[ "$isOk" != "y" && "$isOk" != "Y" ]] && echo "取消操作" && exit 0
 
     idx=0
     local uuids=""
@@ -502,7 +502,7 @@ function ResetRecycle() {
 
     read -n1 -p "开始还原?[Y/N]" isOk
     echo ""
-    [[ "$isOk" != "Y" ]] && [[ "$isOk" != "y" ]] && echo "取消还原操作" && exit 1
+    [[ "$isOk" != "Y" && "$isOk" != "y" ]] && echo "取消还原操作" && exit 1
 
     IFS=$'\n' #修改分隔符为换行符
     local i=0
