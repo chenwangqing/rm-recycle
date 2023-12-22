@@ -386,8 +386,8 @@ function CleanRecycle() {
 
     if [[ -z $uuids ]]; then
         if [[ $st -ge 0 ]] && [[ $et -ge $(date +%s) ]] && [[ -z $file ]] && [ -z $filter ] && [ -z $nfilter ]; then
-            echo -n "将清空整个回收站[Y/N]:"
-            read isOk
+            read -n1 -p "将清空整个回收站[Y/N]:" isOk
+            echo ""
             [[ "$isOk" != "y" ]] && [[ "$isOk" != "Y" ]] && echo "取消操作" && exit 0
             # 删除所有
             $DEL_EXEC -rf "${RECYCLE_DIR}/storage" "${RECYCLE_DIR}/view" "${RECYCLE_DIR}/infos.db"
@@ -422,8 +422,8 @@ function CleanRecycle() {
     local count=$(echo $files | grep -v "^$" | wc -l)
     [[ $count -eq 0 ]] && echo "没有找到文件" && exit 0
 
-    echo -n "清理回收站[Y/N]:"
-    read isOk
+    read -n1 -p "清理回收站[Y/N]:" isOk
+    echo ""
     [[ "$isOk" != "y" ]] && [[ "$isOk" != "Y" ]] && echo "取消操作" && exit 0
 
     idx=0
@@ -500,8 +500,8 @@ function ResetRecycle() {
     # 执行还原
     [[ $count -eq 0 ]] && LOG_PRINTF "没有需要还原的文件: $file" && return 0
 
-    echo -n "开始还原?[Y/N]"
-    read isOk
+    read -n1 -p "开始还原?[Y/N]" isOk
+    echo ""
     [[ "$isOk" != "Y" ]] && [[ "$isOk" != "y" ]] && echo "取消还原操作" && exit 1
 
     IFS=$'\n' #修改分隔符为换行符
