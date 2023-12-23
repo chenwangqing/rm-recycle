@@ -929,6 +929,8 @@ SQL_CreateDB
 # 检查存储路径
 [ ! -d "$DIR_STORAGE" ] && mkdir -p "$DIR_STORAGE"
 
+[ ! -f $$IGNORE ] && echo "" >$IGNORE
+
 # 检查回收站是否存在
 if [ ! -d ${RECYCLE_DIR} ]; then
     mkdir -p ${RECYCLE_DIR}
