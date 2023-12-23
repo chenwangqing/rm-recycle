@@ -260,7 +260,7 @@ function SQL_PrintInfo() {
     local str=$(SQL_Exec "select min(time),max(time),count(*) from info;")
     IFS=$'|' #修改分隔符
     local strs=($str)
-    [ -z ${strs[0]} ] && strs[0]="0K"
+    [ -z ${strs[0]} ] && strs[0]="0"
     [ -z ${strs[1]} ] && strs[1]="0"
     [ -z ${strs[2]} ] && strs[2]="0"
     echo "$(date -d @${strs[0]} '+%Y-%m-%dT%H:%M:%S') - $(date -d @${strs[1]} '+%Y-%m-%dT%H:%M:%S') ${strs[2]}"
